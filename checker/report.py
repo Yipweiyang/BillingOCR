@@ -1,10 +1,11 @@
-"""Reads page 1 of an incident report: defect ref, sketch measurements, ITEM box."""
+"""Reads an RM205/RM206 incident report PDF into an evidence record."""
 import re
 from itertools import combinations
 
 import fitz
 
-from .common import PQ_RE, close, norm_ref, ref_number
+from .common import PQ_RE, close, norm_ref, ocr_image, page_text_with_ocr, ref_number
+from .photos import after_images, native_image
 
 MEAS_RE = re.compile(
     r"(?P<L>\d+(?:\.\d+)?)\s*m?\s*[xX×]\s*"
@@ -209,15 +210,90 @@ def item_box_jobs(page):
     ]
 
 
+def after_photos(doc):
+    """Every image labelled AFTER, in page order."""
+    photos = []
+    for pno, page in enumerate(doc):
+        for xref in after_images(page):
+            image = native_image(doc, xref)
+            # OCR'd here, while this report has a worker process to itself.
+            photos.append({"label": f"p{pno + 1}", "image": image, "text": ocr_image(image)})
+    return photos
+
+
+def looks_like_oic_instruction(text):
+    t = " ".join(text.lower().split())
+    if len(re.sub(r"[^a-z0-9]", "", t)) < 25:
+        return False
+
+    request = any(x in t for x in ("please", "kindly", "assist", "proceed", "request", "instruct"))
+    action = any(x in t for x in ("rectify", "repair", "fix", "render", "replace", "reinstate", "patch", "attend"))
+    if request and action:
+        return True
+
+    # Recognises the five different supporting OIC formats supplied.
+    if "defect record sheet" in t:
+        return True
+    # RM205 defect record: "04-09-2025 SW2-W-14225 / Location: ... / Remarks: ...".
+    # Photo pages carry the ref and Location too, but never Remarks.
+    if norm_ref(t) and "location" in t and "remarks" in t:
+        return True
+    markers = ("remarks", "location", "defect reference", "sector", "efms", "rm206", "footpath", "instructions")
+    return sum(x in t for x in markers) >= 3
+
+
+PHOTO_LABELS = {"BEFORE", "DURING", "AFTER"}
+
+
+def photo_page(page):
+    """A page of the photo template, which always labels its pictures."""
+    return bool({w[4].strip().upper() for w in page.get_text("words")} & PHOTO_LABELS)
+
+
+def oic_record(doc, own_ref=None):
+    """
+    The OIC's instruction or defect record, wherever it sits in the report.
+
+    Position is no guide: it is usually the page after the photos, but in
+    some reports it is a scan that is itself the last page carrying images.
+    What marks it out is that it is not a photo page - those always label
+    their pictures - and that it reads like an OIC record.
+
+    A page naming a different defect is passed over first time round:
+    batch scans sometimes leave another job's record at the back of a
+    report, and accepting it would pass this report on somebody else's
+    paperwork. The second pass drops that condition, so a record whose own
+    reference is merely misread still counts.
+    """
+    candidates = [pno for pno in range(1, len(doc)) if not photo_page(doc[pno])]
+    for skip_other_defects in (True, False):
+        for pno in candidates:
+            text = page_text_with_ocr(doc[pno])
+            named = norm_ref(text)
+            if skip_other_defects and own_ref and named and named != own_ref:
+                continue
+            if looks_like_oic_instruction(text):
+                return {"found": True, "detail": f"OIC instruction/supporting page detected on page {pno + 1}"}
+    if not candidates:
+        return {"found": False, "detail": "Every page after the sketch holds photos; no OIC instruction found"}
+    pages = ", ".join(str(pno + 1) for pno in candidates)
+    return {"found": False, "detail": f"No clear OIC instruction on page {pages}"}
+
+
 def parse_report(pdf_bytes, filename, expected_refs=None):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    ms = measurements(doc[0])
-    pcs = pq_candidates(doc[0])
-    ms = relevant_measurements(ms, pcs)
-    return {
-        "doc": doc,
-        "filename": filename,
-        "ref": report_ref(doc, filename, expected_refs),
-        "jobs": attach_pq(ms, pcs),
-        "item_jobs": item_box_jobs(doc[0]),
-    }
+    try:
+        ms = measurements(doc[0])
+        pcs = pq_candidates(doc[0])
+        ms = relevant_measurements(ms, pcs)
+        ref = report_ref(doc, filename, expected_refs)
+        return {
+            "key": ref,
+            "source": filename,
+            "claimed_jobs": item_box_jobs(doc[0]),
+            "sketch_jobs": attach_pq(ms, pcs),
+            "after_photos": after_photos(doc),
+            "oic": oic_record(doc, ref),
+        }
+    finally:
+        doc.close()

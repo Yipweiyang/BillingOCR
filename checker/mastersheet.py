@@ -21,16 +21,16 @@ MASTER_COLUMNS = {
 DEFAULT_COLUMNS = {"sn": 0, "date": 2, "ref": 4, "pq": 11, "length": 12, "width": 13, "qty": 15}
 
 
-def header_columns(row):
+def header_columns(row, wanted=MASTER_COLUMNS):
     """Map field -> column index when the row is the table header, else None."""
     cells = [" ".join((c or "").split()).upper() for c in row]
     cols = {}
-    for field, names in MASTER_COLUMNS.items():
+    for field, names in wanted.items():
         for j, c in enumerate(cells):
             if c in names:
                 cols[field] = j
                 break
-    return cols if len(cols) == len(MASTER_COLUMNS) else None
+    return cols if len(cols) == len(wanted) else None
 
 
 def parse_master(pdf_bytes):

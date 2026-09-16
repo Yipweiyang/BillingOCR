@@ -219,3 +219,5 @@ __marimo__/
 
 # data folders
 data/
+# OCR cache (rebuilt on demand)
+.ocr_cache/

@@ -9,27 +9,57 @@ from dateutil import parser as dtparser
 from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
 
+from . import cache
+
 NUM_TOL = 0.02
 # Sector prefix varies by contract: NE4 (RM206), SW2 (RM205).
 # Lookarounds rather than \b so a filename suffix such as "_R1" still matches.
 REF_RE = re.compile(r"(?<![A-Z])([A-Z]{2})\s*(\d+)\s*[-–—]?\s*([WE])\s*[-–—]?\s*(\d{4,6})(?!\d)", re.I)
-PQ_RE = re.compile(r"\bPQ\d+(?:\.\d+)+(?:[A-Za-z])?\b", re.I)
+# The item code may end in a letter and digit, e.g. PQ30.3.1c1 (TR387).
+PQ_RE = re.compile(r"\bPQ\d+(?:\.\d+)+(?:[A-Za-z]\d*)?\b", re.I)
 
 _OCR = None
+_OCR_OPTIONS = {}
+
+
+def use_single_thread():
+    """
+    Build the OCR engine with one thread from here on.
+
+    By default the engine spreads each image over every core, which is
+    right for one process and disastrous for several: eight workers each
+    claiming the whole machine thrash. One thread costs ~40% per image
+    (0.92s -> 1.30s here) and lets eight run at once. onnxruntime takes
+    this from its session options, not from OMP_NUM_THREADS.
+    """
+    global _OCR, _OCR_OPTIONS
+    _OCR_OPTIONS = {"intra_op_num_threads": 1}
+    _OCR = None
 
 
 def ocr_engine():
     global _OCR
     if _OCR is None:
-        _OCR = RapidOCR()
+        _OCR = RapidOCR(**_OCR_OPTIONS)
     return _OCR
 
 
 def ocr_image(img):
-    result, _ = ocr_engine()(np.array(img.convert("RGB")))
-    if not result:
-        return ""
-    return "\n".join(str(x[1]) for x in result if len(x) >= 2 and x[1])
+    """
+    The text of one image, read once and then remembered - see cache.py.
+    Every OCR in the project comes through here, so caching it covers site
+    photos, scanned pages and the higher-resolution board re-reads alike.
+    """
+    rgb = img.convert("RGB")
+    key = cache.key_for(rgb)
+    remembered = cache.get(key)
+    if remembered is not None:
+        return remembered
+
+    result, _ = ocr_engine()(np.array(rgb))
+    text = "\n".join(str(x[1]) for x in result if len(x) >= 2 and x[1]) if result else ""
+    cache.put(key, text)
+    return text
 
 
 def norm_ref(text):
@@ -67,6 +97,11 @@ def num(value):
 
 def close(a, b, tol=NUM_TOL):
     return a is not None and b is not None and abs(a - b) <= tol
+
+
+def area_total(areas):
+    """Net area of [{length, width, count, sign}], deductions (sign -1) taken off."""
+    return sum(a["sign"] * a["length"] * a["width"] * a.get("count", 1) for a in areas)
 
 
 def parse_date(text):
