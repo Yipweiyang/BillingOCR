@@ -12,6 +12,7 @@ never depend on a contract's document layout:
     sketch_jobs   [{"pq", "length", "width", "qty"}] from the sketch
     board_dims    [{"length", "width", "label"}] hand-written on site boards (TR387 only)
     board_texts   [{"label", "text", "path"}] raw OCR of those photos (TR387 only)
+    sketch_errors [str] sketch arithmetic that does not add up (TR388 only)
     after_photos  [{"label", "image" or "path", "group", "text"}] - text is the
                   OCR already done by the reader, group splits a shared folder
     oic           {"found", "detail"}
@@ -28,6 +29,7 @@ from .mastersheet import parse_master
 from .parallel import pmap
 from .report import parse_report
 from .tr387 import photo_folders, read_tr387_batch
+from .tr388 import is_tr388_bundle, is_tr388_master, read_tr388_batch
 
 
 def _read_one_report(job):
@@ -68,7 +70,12 @@ def read_batch(batch_dir, progress=None):
                          if f.lower().endswith(".pdf") and f != name + ".pdf")
     if report_pdfs:
         reports = [(f, _read(os.path.join(batch_dir, f))) for f in report_pdfs]
-        items, evidence = read_rm_pdfs(_read(master), reports, progress=progress)
+        master_bytes = _read(master)
+        # TR388: one bundle PDF holds a whole sector's incidents.
+        if is_tr388_master(master_bytes) and all(is_tr388_bundle(data) for _, data in reports):
+            items, evidence = read_tr388_batch(master_bytes, reports, progress=progress)
+            return items, evidence, "incident report"
+        items, evidence = read_rm_pdfs(master_bytes, reports, progress=progress)
         return items, evidence, "incident report"
 
     if photo_folders(batch_dir):

@@ -60,6 +60,10 @@ of evidence, so the rest cannot run).
 |---|---|---|
 | RM205, RM206 | One report PDF per defect | Defect reference, e.g. `NE4-E-42446` |
 | TR387 / SP-717 | A folder of site photos per item | S/N — these rows carry no defect reference |
+| TR388 (CFM) | One bundle PDF per sector: OIC screenshot, sketch, photo sheet per incident | D.No, e.g. `15612W` — plus the landmark (`Lp 46`) where a D.No repeats |
+
+A TR388 mastersheet lists every sector, so rows for a sector with no bundle in the folder report
+N/A rather than missing.
 
 Photo batches have no OIC page, so check 4 reports N/A, and quantities come from the
 dimensions hand-written on the board in the photos. A batch matching neither format stops
@@ -71,7 +75,7 @@ Reading documents is kept apart from judging them, so a new contract needs a new
 changes to the checks.
 
 - `checker/readers.py` — turns a batch into mastersheet items plus evidence, and picks the format
-- `checker/mastersheet.py`, `report.py` — the RM formats; `tr387.py` — the photo format
+- `checker/mastersheet.py`, `report.py` — the RM formats; `tr387.py` — the photo format; `tr388.py` — the bundle format
 - `checker/photos.py` — watermark dates, AFTER photos, board dimensions
 - `checker/checks.py` — the four checks; knows nothing about page layouts
 - `checker/common.py`, `cache.py`, `parallel.py` — OCR, remembered results, worker pool

@@ -161,15 +161,21 @@ def compare_jobs(item, evidence):
         notes.append(f"billed as {len(item_jobs)} line(s) where the mastersheet lists "
                      f"{len(master_jobs)} - totals agree")
 
-    sketch_errors = compare_measurements(master_jobs, sketch or [])
-    if sketch_errors is None:
-        notes.append("sketch measurements could not be aligned, dimensions unverified")
-    elif sketch_errors:
-        return FLAG, "Sketch measurements differ: " + " | ".join(sketch_errors)
+    # TR388 sketches give no dimensions per mastersheet job, only area
+    # arithmetic, so sketch_jobs is None there and the sums are checked instead.
+    if sketch is not None:
+        sketch_errors = compare_measurements(master_jobs, sketch)
+        if sketch_errors is None:
+            notes.append("sketch measurements could not be aligned, dimensions unverified")
+        elif sketch_errors:
+            return FLAG, "Sketch measurements differ: " + " | ".join(sketch_errors)
 
     total = sum(master_totals.values())
     detail = f"Quantity box matches mastersheet ({len(master_totals)} PQ, total {round(total, 2)})"
-    return PASS, detail + (" [" + "; ".join(notes) + "]" if notes else "")
+    suffix = " [" + "; ".join(notes) + "]" if notes else ""
+    if evidence.get("sketch_errors"):
+        return REVIEW, f"{detail}, but the sketch arithmetic is off: " + " | ".join(evidence["sketch_errors"]) + suffix
+    return PASS, detail + suffix
 
 
 # ---------- Check 3: AFTER photos ----------
@@ -179,8 +185,17 @@ def compare_jobs(item, evidence):
 AFTER_PHOTO_GRACE_DAYS = 1
 
 
+def lost_tens_digit(read, master_date):
+    """
+    True when OCR dropped the first digit of the day - "17 Apr" read as
+    "7 Apr" - which happens when that digit sits over something white.
+    """
+    return (read.year, read.month) == (master_date.year, master_date.month) and \
+        master_date.day >= 10 and read.day == master_date.day % 10
+
+
 def photo_dates_match(photos, master_date):
-    confirmed, wrong, unreadable, skipped, by_board, late = [], [], [], [], [], []
+    confirmed, wrong, unreadable, skipped, by_board, late, doubtful = [], [], [], [], [], [], []
 
     for photo in photos:
         label = photo["label"]
@@ -204,6 +219,8 @@ def photo_dates_match(photos, master_date):
             elif board_confirms(load_photo(photo), master_date):
                 confirmed.append(label)
                 by_board.append(label)
+            elif any(lost_tens_digit(d, master_date) for d in seen):
+                doubtful.append((label, seen))
             else:
                 wrong.append((label, seen))
         else:
@@ -228,6 +245,11 @@ def photo_dates_match(photos, master_date):
     if wrong:
         details = "; ".join(f"{label}=" + "/".join(fmt_date(d) for d in ds) for label, ds in wrong)
         return FLAG, f"Master completion date {fmt_date(master_date)} != {details}{suffix}"
+
+    if doubtful and not confirmed:
+        details = "; ".join(f"{label}=" + "/".join(fmt_date(d) for d in ds) for label, ds in doubtful)
+        return REVIEW, (f"Watermark read as {details}, probably {fmt_date(master_date)} with its "
+                        f"first digit lost - check the photo{suffix}")
 
     if not confirmed:
         return FLAG, f"No AFTER photo timestamp could be read{suffix}"
@@ -273,19 +295,27 @@ def run_checks(items, evidence, evidence_name="incident report", progress=None):
         if e["key"]:
             by_key.setdefault(e["key"], []).append(e)
 
+    # A TR388 mastersheet lists every sector while a bundle covers one, so a
+    # sector with no evidence at all was not submitted rather than missing.
+    covered = {items[k].get("sector") for k in by_key if k in items}
+    not_submitted = {k for k, m in items.items()
+                     if m.get("sector") and m["sector"] not in covered and k not in by_key}
+
     rows = []
     for done, (key, m) in enumerate(sorted(items.items(), key=lambda x: x[1]["sn"]), 1):
         if progress:
             progress(done, len(items))
         count = counts.get(key, 0)
-        if count == 0:
+        if key in not_submitted:
+            c1, d1 = NA, f"No {evidence_name}s for sector {m['sector']} in this batch"
+        elif count == 0:
             c1, d1 = FLAG, f"Missing {evidence_name}"
         elif count > 1:
             c1, d1 = FLAG, f"Duplicate {evidence_name}s: {count}"
         else:
             c1, d1 = PASS, f"Exactly one {evidence_name} found"
 
-        c2 = c3 = c4 = "NOT RUN"
+        c2 = c3 = c4 = NA if key in not_submitted else "NOT RUN"
         d2 = d3 = d4 = "Requires exactly one matched report"
 
         if count == 1:
@@ -298,6 +328,8 @@ def run_checks(items, evidence, evidence_name="incident report", progress=None):
             c4, d4 = check_oic(e["oic"])
 
         row = {"S/N": m["sn"], "Defect Ref": m.get("ref", key)}
+        if "sector" in m:
+            row["Sector"] = m["sector"]
         if "location" in m:
             row["Location"] = " ".join(x for x in (m["location"], m.get("landmark")) if x)
         row.update({
@@ -314,7 +346,7 @@ def run_checks(items, evidence, evidence_name="incident report", progress=None):
         "rows": rows,
         "master_count": len(items),
         "uploaded_count": len(evidence),
-        "missing": sorted(item_keys - evidence_keys),
+        "missing": sorted(item_keys - evidence_keys - not_submitted),
         "duplicates": sorted(key for key, n in counts.items() if n > 1),
         "extra": sorted(evidence_keys - item_keys),
         "unreadable": [e["source"] for e in evidence if not e["key"]],
