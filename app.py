@@ -1,13 +1,8 @@
 """Streamlit UI. Run with: streamlit run app.py"""
-import os
-
 import pandas as pd
 import streamlit as st
 
-from checker import check_batch, read_rm_pdfs, run_checks
-
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-FROM_FOLDER, FROM_UPLOAD = "Batch folder in data/", "Upload PDFs (RM205 / RM206)"
+from checker import read_uploads, run_checks
 
 CHECK_COLS = ["Check 1", "Check 2", "Check 3", "Check 4"]
 STATUS_STYLE = {
@@ -36,12 +31,6 @@ def style_results(df):
     return df.style.apply(lambda _: styles, axis=None)
 
 
-def batch_folders():
-    if not os.path.isdir(DATA_DIR):
-        return []
-    return sorted(d for d in os.listdir(DATA_DIR) if os.path.isdir(os.path.join(DATA_DIR, d)))
-
-
 def joined(values):
     return ", ".join(map(str, values))
 
@@ -50,17 +39,13 @@ st.set_page_config(page_title="PDF Checker", layout="wide")
 st.title("Mastersheet / Incident Report Checker")
 st.caption("Checks: missing/duplicates, quantities, AFTER-photo completion dates, OIC instruction existence")
 
-source = st.radio("Input", [FROM_FOLDER, FROM_UPLOAD], horizontal=True)
-if source == FROM_FOLDER:
-    batch = st.selectbox("Batch", batch_folders(),
-                         help="Each folder holds the mastersheet PDF, named after the folder, and its evidence.")
-    ready = bool(batch)
-    csv_name = f"{batch}_check_results.csv" if batch else "check_results.csv"
-else:
-    master_file = st.file_uploader("1. Upload mastersheet PDF", type="pdf")
-    report_files = st.file_uploader("2. Upload all incident report PDFs", type="pdf", accept_multiple_files=True)
-    ready = bool(master_file and report_files)
-    csv_name = "check_results.csv"
+master_file = st.file_uploader("1. Upload mastersheet PDF", type="pdf")
+report_files = st.file_uploader(
+    "2. Upload the evidence", type=["pdf", "zip"], accept_multiple_files=True,
+    help="Incident report PDFs, or - for formats whose evidence is a folder of site photos "
+         "per S/N - those folders zipped up.")
+ready = bool(master_file and report_files)
+csv_name = "check_results.csv"
 
 if st.button("Run checks", type="primary", disabled=not ready):
     bar = st.progress(0.0, text="Starting...")
@@ -69,15 +54,17 @@ if st.button("Run checks", type="primary", disabled=not ready):
         bar.progress(done / total if total else 1.0, text=f"{phase}: {done} of {total}")
 
     try:
-        if source == FROM_FOLDER:
-            result = check_batch(os.path.join(DATA_DIR, batch), show)
-        else:
-            items, evidence = read_rm_pdfs(
-                master_file.getvalue(),
-                [(f.name, f.getvalue()) for f in report_files],
-                progress=lambda done, total: show("Reading reports", done, total))
-            result = run_checks(items, evidence,
-                                progress=lambda done, total: show("Running checks", done, total))
+        items, evidence, evidence_name = read_uploads(
+            master_file.getvalue(),
+            [(f.name, f.getvalue()) for f in report_files],
+            progress=lambda done, total: show("Reading reports", done, total))
+        result = run_checks(items, evidence, evidence_name,
+                            progress=lambda done, total: show("Running checks", done, total))
+    except ValueError as e:
+        # The batch is not a shape this app can check - say why, plainly.
+        bar.empty()
+        st.error(str(e))
+        st.stop()
     except Exception as e:
         bar.empty()
         st.exception(e)

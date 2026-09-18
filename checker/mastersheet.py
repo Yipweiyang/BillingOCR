@@ -21,8 +21,8 @@ MASTER_COLUMNS = {
 DEFAULT_COLUMNS = {"sn": 0, "date": 2, "ref": 4, "pq": 11, "length": 12, "width": 13, "qty": 15}
 
 
-def header_columns(row, wanted=MASTER_COLUMNS):
-    """Map field -> column index when the row is the table header, else None."""
+def header_match(row, wanted=MASTER_COLUMNS):
+    """Map field -> column index for every wanted header this row carries."""
     cells = [" ".join((c or "").split()).upper() for c in row]
     cols = {}
     for field, names in wanted.items():
@@ -30,13 +30,34 @@ def header_columns(row, wanted=MASTER_COLUMNS):
             if c in names:
                 cols[field] = j
                 break
+    return cols
+
+
+def header_columns(row, wanted=MASTER_COLUMNS):
+    """Map field -> column index when the row is the table header, else None."""
+    cols = header_match(row, wanted)
     return cols if len(cols) == len(wanted) else None
+
+
+def is_rm_master(pdf_bytes):
+    """True when the sheet carries the RM205/RM206 table header."""
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages[:3]:
+            for table in page.extract_tables():
+                if any(header_columns(row) for row in table):
+                    return True
+    return False
 
 
 def parse_master(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     records = {}
     cols = DEFAULT_COLUMNS
+    # Columns are read from the header row. Falling back to fixed positions
+    # for a whole sheet would read the wrong columns without saying so, so a
+    # sheet whose header is never found is an error, not a silent guess.
+    seen_header = False
+    near_miss = None
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for pno, p in enumerate(pdf.pages):
@@ -51,9 +72,12 @@ def parse_master(pdf_bytes):
 
                 current = None
                 for i, raw in enumerate(rows):
-                    found = header_columns(raw)
-                    if found:
-                        cols = found
+                    found = header_match(raw)
+                    if len(found) == len(MASTER_COLUMNS):
+                        cols, seen_header = found, True
+                        continue
+                    if len(found) >= 3:  # a header row, but reworded
+                        near_miss = sorted(set(MASTER_COLUMNS) - set(found))
                         continue
 
                     row = list(raw) + [None] * (max(cols.values()) + 1 - len(raw))
@@ -80,4 +104,12 @@ def parse_master(pdf_bytes):
                         })
 
     doc.close()
+    if not seen_header:
+        expected = ", ".join(names[0] for names in MASTER_COLUMNS.values())
+        if near_miss:
+            missing = ", ".join(MASTER_COLUMNS[f][0] for f in near_miss)
+            raise ValueError(f"This mastersheet's table header is missing: {missing}. "
+                             f"Expected a header row with: {expected}.")
+        raise ValueError(f"No mastersheet table header found. "
+                         f"Expected a header row with: {expected}.")
     return records

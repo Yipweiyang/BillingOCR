@@ -62,7 +62,9 @@ BOARD_SCALES = (2, 3)
 # decimal point as ':' or '-' ("1:3×1.4"), so those are restored first, one
 # line at a time so a watermark time is never joined to a dimension.
 NUMBER = r"\d*\.?\d+"
-BOARD_DECIMAL_RE = re.compile(r"(?<=\d)[:\-,·](?=\d)")
+# A decimal point on a board comes back as any of these marks, or as a "+"
+# where the pen crossed it: ".450x1.5m" is read as "4+50x1-5m".
+BOARD_DECIMAL_RE = re.compile(r"(?<=\d)[:\-,·+](?=\d)")
 BOARD_DIM_RE = re.compile(rf"(?<![\d.])({NUMBER})\s*[xX×*]\s*({NUMBER})(?![\d.])")
 
 

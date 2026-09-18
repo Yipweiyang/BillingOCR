@@ -63,6 +63,16 @@ def row_areas(length_cell, width_cell):
             for (L, s, lc), (W, _, wc) in zip(lengths, widths)]
 
 
+def is_tr387_master(pdf_bytes):
+    """True when the sheet carries the photo-folder format's table header."""
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages[:3]:
+            for table in page.extract_tables():
+                if any(header_columns(row, TR387_COLUMNS) for row in table):
+                    return True
+    return False
+
+
 def parse_tr387_master(pdf_bytes):
     """{S/N: {"sn", "ref", "date", "location", "landmark", "jobs": [{"pq", "qty"}], "areas"}}"""
     items = {}

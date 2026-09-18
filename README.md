@@ -16,14 +16,20 @@ python -m venv .venv
 .venv/bin/python -m streamlit run app.py       # Windows: .venv\Scripts\python
 ```
 
-Then pick a batch from `data/`, or upload a mastersheet and its report PDFs.
+Then upload a mastersheet and its evidence - one incident report PDF per defect, a bundle PDF
+per sector, or a ZIP of the photo folders. The format is recognised from the mastersheet,
+and a batch whose files do not match it is refused with an explanation rather than checked as
+the wrong format.
+
+A batch folder under `data/` can also be checked in code, via `check_batch()`.
 
 The first run over new photos takes a few minutes, because every image is read by OCR. The
 results are remembered, so running the same batch again takes seconds.
 
 ## Data layout
 
-One folder per batch, holding the mastersheet and its evidence. **The mastersheet PDF must be
+Only used by `check_batch()`, not by the app. One folder per batch, holding the mastersheet
+and its evidence. **The mastersheet PDF must be
 named after its folder** — that is how it is found.
 
 ```
@@ -75,7 +81,7 @@ Reading documents is kept apart from judging them, so a new contract needs a new
 changes to the checks.
 
 - `checker/readers.py` — turns a batch into mastersheet items plus evidence, and picks the format
-- `checker/mastersheet.py`, `report.py` — the RM formats; `tr387.py` — the photo format; `tr388.py` — the bundle format
+- `checker/mastersheet.py`, `report.py` — the RM formats; `photo_folder_format.py` — the photo format; `bundled_pdf_format.py` — the bundle format
 - `checker/photos.py` — watermark dates, AFTER photos, board dimensions
 - `checker/checks.py` — the four checks; knows nothing about page layouts
 - `checker/common.py`, `cache.py`, `parallel.py` — OCR, remembered results, worker pool

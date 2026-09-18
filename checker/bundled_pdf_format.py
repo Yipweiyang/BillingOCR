@@ -25,7 +25,7 @@ from .common import close, num, ocr_image, parse_date
 from .mastersheet import header_columns
 from .parallel import pmap
 from .photos import native_image, parse_timestamp
-from .tr387 import normalise_place
+from .photo_folder_format import normalise_place
 
 TR388_COLUMNS = {
     "sn": ("S.NO",),
