@@ -141,6 +141,55 @@ def after_images(page):
     return out
 
 
+# A distance typed over a photo by the contractor, e.g. "1.4m" beside a
+# tape or "2.50M" along one side of the red box around the repair.
+PHOTO_DIST_RE = re.compile(r"(\d*\.?\d+)\s*(mm|m)", re.I)
+PHOTO_LABELS = ("BEFORE", "DURING", "AFTER")
+
+
+def photo_distances(page, pno):
+    """
+    The distances typed over each photo on one page, in metres, as
+    [{"label", "values"}] - one entry per photo that carries any.
+
+    These are text in the PDF, not part of the image, so no OCR is needed.
+    Only text drawn after its photo counts: a report built from a copy of
+    another keeps that one's labels in the text layer, hidden underneath
+    the new photos.
+    """
+    log = page.get_bboxlog()
+    frames = [(fitz.Rect(r), i) for i, (kind, r) in enumerate(log) if kind == "fill-image"]
+    texts = [(fitz.Rect(r), i) for i, (kind, r) in enumerate(log) if kind == "fill-text"]
+
+    def frame_at(point):
+        inside = [(r, i) for r, i in frames if r.contains(point)]
+        return min(inside, key=lambda x: x[0].get_area()) if inside else None
+
+    def drawn_at(point):
+        return max((i for r, i in texts if r.contains(point)), default=-1)
+
+    kinds, lines = {}, {}
+    for w in page.get_text("words"):
+        c = fitz.Point((w[0] + w[2]) / 2, (w[1] + w[3]) / 2)
+        if w[4].strip().upper() in PHOTO_LABELS and (f := frame_at(c)):
+            kinds[f[1]] = w[4].strip().upper()
+        lines.setdefault((w[5], w[6]), []).append(w)
+
+    values = {}
+    for ws in lines.values():
+        m = PHOTO_DIST_RE.fullmatch("".join(w[4] for w in ws))
+        if not m:
+            continue
+        c = fitz.Point((ws[0][0] + ws[-1][2]) / 2, (ws[0][1] + ws[-1][3]) / 2)
+        f = frame_at(c)
+        value = float(m.group(1)) / (1000 if m.group(2).lower() == "mm" else 1)
+        if f and value > 0 and drawn_at(c) > f[1]:
+            values.setdefault(f[1], []).append(value)
+
+    return [{"label": " ".join(x for x in (f"p{pno + 1}", kinds.get(i)) if x), "values": vs}
+            for i, vs in values.items()]
+
+
 def native_image(doc, xref):
     info = doc.extract_image(xref)
     return Image.open(io.BytesIO(info["image"])).convert("RGB")

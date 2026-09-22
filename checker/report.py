@@ -5,7 +5,7 @@ from itertools import combinations
 import fitz
 
 from .common import PQ_RE, close, norm_ref, ocr_image, page_text_with_ocr, ref_number
-from .photos import after_images, native_image
+from .photos import after_images, native_image, photo_distances
 
 MEAS_RE = re.compile(
     r"(?P<L>\d+(?:\.\d+)?)\s*m?\s*[xX×]\s*"
@@ -293,6 +293,7 @@ def parse_report(pdf_bytes, filename, expected_refs=None):
             "claimed_jobs": item_box_jobs(doc[0]),
             "sketch_jobs": attach_pq(ms, pcs),
             "after_photos": after_photos(doc),
+            "photo_dims": [d for pno in range(1, len(doc)) for d in photo_distances(doc[pno], pno)],
             "oic": oic_record(doc, ref),
         }
     finally:

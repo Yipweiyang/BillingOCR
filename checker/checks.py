@@ -178,6 +178,76 @@ def compare_jobs(item, evidence):
     return PASS, detail + suffix
 
 
+def sized(jobs):
+    """The jobs that give a length and a width."""
+    return [j for j in jobs or [] if j.get("length") is not None and j.get("width") is not None]
+
+
+def compare_photo_dims(item, evidence):
+    """
+    The distances typed over the tape photos and the box drawn round the
+    repair, against the mastersheet. Returns None when there is nothing to
+    compare, else (agrees, note).
+
+    A box agrees when its two sides are a job's length and width, or when
+    they multiply to a job's quantity. A tape agrees when it is one of those
+    sides. The sides come from the mastersheet, or from the sketch where the
+    mastersheet gives none (RM205, TR388 - including the gross area a
+    deduction is taken from); with neither, a lone tape proves nothing.
+
+    A report often labels the surroundings as well - the whole footpath
+    bay next to the patch - so a stray distance proves nothing while some
+    other photo confirms the job. Only photos that confirm nothing at all
+    count against it.
+    """
+    photo_dims = evidence.get("photo_dims")
+    if not photo_dims:
+        return None
+    jobs = item["jobs"]
+    sizes = sized(jobs) or sized(evidence.get("sketch_jobs")) or evidence.get("sketch_sizes") or []
+    sides = [x for j in sizes for x in (j["length"], j["width"])]
+
+    def confirms(a, b):
+        return any(close(a, j["length"]) and close(b, j["width"]) for j in sizes) or \
+            any(close(a * b, j["qty"], tol=0.006) for j in jobs if j["qty"] is not None)
+
+    boxes, tapes, other = [], [], []
+    for p in photo_dims:
+        vs = p["values"]
+        pair = next(((a, b) for a, b in permutations(vs, 2) if confirms(a, b)), None)
+        if pair:
+            boxes.append(f"{pair[0]:g} x {pair[1]:g} on {p['label']}")
+        elif len(vs) == 1 and any(close(vs[0], s) for s in sides):
+            tapes.append(f"{vs[0]:g}m on {p['label']}")
+        elif len(vs) > 1 or sides:
+            other.append(p)
+
+    if boxes or tapes:
+        return True, "photo measurements agree: " + ", ".join(boxes + tapes)
+    if not other:
+        return None
+
+    listed = " + ".join(f"{j['length']:g} x {j['width']:g}" for j in sizes) or \
+        " + ".join(f"{j['qty']:g}" for j in jobs)
+    read = "; ".join(f"{' x '.join(f'{v:g}' for v in p['values'])}m on {p['label']}" for p in other)
+    return False, f"photo measurements read {read}, against {listed}"
+
+
+def reinforce_with_photos(status, detail, item, evidence):
+    """
+    Check 2's sub-check. Photo measurements are typed by the contractor and
+    may label more than the repair, so they support a PASS or turn it into
+    REVIEW; they never FLAG on their own. Without them check 2 stands as it is.
+    """
+    result = compare_photo_dims(item, evidence)
+    if result is None or status == NA:
+        return status, detail
+    agrees, note = result
+    if status == PASS and not agrees:
+        return REVIEW, f"{detail}, but {note}"
+    return status, f"{detail} [{note}]"
+
+
 # ---------- Check 3: AFTER photos ----------
 # A crew that finishes late in the day may photograph the finished work
 # the next morning, so an AFTER photo dated shortly after the completion
@@ -323,7 +393,7 @@ def run_checks(items, evidence, evidence_name="incident report", progress=None):
             # Matched by key, but the evidence may describe another site.
             if e.get("location_note"):
                 c1, d1 = REVIEW, f"Evidence found, but the site may not match: {e['location_note']}"
-            c2, d2 = compare_jobs(m, e)
+            c2, d2 = reinforce_with_photos(*compare_jobs(m, e), m, e)
             c3, d3 = check_after_dates(e["after_photos"], m["date"])
             c4, d4 = check_oic(e["oic"])
 

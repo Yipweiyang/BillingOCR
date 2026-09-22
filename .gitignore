@@ -221,3 +221,6 @@ __marimo__/
 data/
 # OCR cache (rebuilt on demand)
 .ocr_cache/
+
+# price
+price/

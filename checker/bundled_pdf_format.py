@@ -24,7 +24,7 @@ from PIL import Image
 from .common import close, num, ocr_image, parse_date
 from .mastersheet import header_columns
 from .parallel import pmap
-from .photos import native_image, parse_timestamp
+from .photos import native_image, parse_timestamp, photo_distances
 from .photo_folder_format import normalise_place
 
 TR388_COLUMNS = {
@@ -207,6 +207,16 @@ def sketch_errors(page):
     return errors
 
 
+def sketch_sizes(page):
+    """Every 'L x W =' in the sketch's Area lines, deductions included, as [{"length", "width"}]."""
+    out = []
+    for m in PRODUCT_RE.finditer(" ".join(page.get_text().split())):
+        size = {"length": float(m.group(1)), "width": float(m.group(2))}
+        if size not in out:
+            out.append(size)
+    return out
+
+
 def after_photo_images(doc, page):
     """
     The images labelled After. On this template the label sits above its
@@ -260,9 +270,11 @@ def read_incident(doc, source, oic, sketch, photos):
         "source": f"{source} p{pages[0]}-{pages[-1]}",
         "claimed_jobs": item_box_jobs(page),
         "sketch_errors": sketch_errors(page),
+        "sketch_sizes": sketch_sizes(page),
         "oic": ({"found": True, "detail": f"OIC instruction screenshot on page {oic + 1}"} if oic is not None
                 else {"found": False, "detail": f"No OIC instruction page before the sketch on page {sketch + 1}"}),
         "photos": [],
+        "photo_dims": photo_distances(doc[photos], photos) if photos is not None else [],
     }
     if photos is not None:
         for n, (xref, rect) in enumerate(after_photo_images(doc, doc[photos]), 1):
@@ -336,7 +348,9 @@ def read_tr388_batch(master_bytes, bundles, progress=None):
             "claimed_jobs": r["claimed_jobs"],
             "sketch_jobs": None,
             "sketch_errors": r["sketch_errors"],
+            "sketch_sizes": r["sketch_sizes"],
             "after_photos": [next(read) for _ in r["photos"]],
+            "photo_dims": r["photo_dims"],
             "oic": r["oic"],
         })
     return items, evidence

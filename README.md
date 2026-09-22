@@ -55,6 +55,11 @@ data/
 | 3 | Were the AFTER photos taken when the mastersheet says the work finished? |
 | 4 | Is the officer's instruction in the report? |
 
+Check 2 also compares the distances typed over the photos, beside a measuring tape or along the
+box drawn around the repair, with the billed dimensions. This only adds weight: agreement is
+noted, and a disagreement turns a PASS into REVIEW. A report with no such labels is checked as
+before.
+
 Results are **PASS**, **FLAG** (the evidence contradicts the mastersheet), **REVIEW** (it could
 not be read well enough to decide — usually hand-writing, so it needs eyes, not suspicion),
 **N/A** (this format has nothing to check here) or **NOT RUN** (check 1 found no single piece
@@ -107,6 +112,8 @@ automatically. Deleting it only costs time.
   late "during" shot.
 - A board with no dimensions written on it cannot be verified at all.
 - Hand-writing is read imperfectly, so a few items per batch come back as REVIEW.
+- The photo measurements are the contractor's own labels, read from the PDF text. The numbers on
+  the tape itself are not read, and photo folders (TR387) have no labels to compare.
 - There is no automated test suite yet; changes are checked by re-running whole batches and
   comparing against previous results.
 - Only run on Linux and WSL so far. Nothing in it is platform-specific, but the Windows

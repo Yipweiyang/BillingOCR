@@ -13,6 +13,9 @@ never depend on a contract's document layout:
     board_dims    [{"length", "width", "label"}] hand-written on site boards (TR387 only)
     board_texts   [{"label", "text", "path"}] raw OCR of those photos (TR387 only)
     sketch_errors [str] sketch arithmetic that does not add up (TR388 only)
+    sketch_sizes  [{"length", "width"}] every L x W in the sketch (TR388 only)
+    photo_dims    [{"label", "values"}] distances typed over tape photos and the
+                  box drawn round the repair, in metres (PDF formats only)
     after_photos  [{"label", "image" or "path", "group", "text"}] - text is the
                   OCR already done by the reader, group splits a shared folder
     oic           {"found", "detail"}
