@@ -2,9 +2,9 @@
 import pandas as pd
 import streamlit as st
 
-from checker import read_uploads, run_checks
+from checker import price_list_for, read_uploads, run_checks
 
-CHECK_COLS = ["Check 1", "Check 2", "Check 3", "Check 4"]
+CHECK_COLS = ["Check 1", "Check 2", "Check 3", "Check 4", "Check 5"]
 STATUS_STYLE = {
     "FLAG": "background-color: #fdecea; color: #a4192c; font-weight: 600",
     "REVIEW": "background-color: #fff4e0; color: #8a5300; font-weight: 600",
@@ -37,7 +37,8 @@ def joined(values):
 
 st.set_page_config(page_title="PDF Checker", layout="wide")
 st.title("Mastersheet / Incident Report Checker")
-st.caption("Checks: missing/duplicates, quantities, AFTER-photo completion dates, OIC instruction existence")
+st.caption("Checks: missing/duplicates, quantities, AFTER-photo completion dates, OIC instruction existence, "
+           "unit rates against the contract's rate schedule")
 
 master_file = st.file_uploader("1. Upload mastersheet PDF", type="pdf")
 report_files = st.file_uploader(
@@ -59,7 +60,8 @@ if st.button("Run checks", type="primary", disabled=not ready):
             [(f.name, f.getvalue()) for f in report_files],
             progress=lambda done, total: show("Reading reports", done, total))
         result = run_checks(items, evidence, evidence_name,
-                            progress=lambda done, total: show("Running checks", done, total))
+                            progress=lambda done, total: show("Running checks", done, total),
+                            price_list=price_list_for(master_file.getvalue()))
     except ValueError as e:
         # The batch is not a shape this app can check - say why, plainly.
         bar.empty()

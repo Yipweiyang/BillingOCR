@@ -7,3 +7,4 @@ rapidocr-onnxruntime==1.4.4
 pillow==12.3.0
 numpy==2.5.3
 python-dateutil==2.9.0.post0
+xlrd==2.0.2

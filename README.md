@@ -54,11 +54,15 @@ data/
 | 2 | Do the quantities agree with what was claimed? |
 | 3 | Were the AFTER photos taken when the mastersheet says the work finished? |
 | 4 | Is the officer's instruction in the report? |
+| 5 | Is each line billed at the contract's scheduled unit rate, and does QTY × rate give its total? |
 
 Check 2 also compares the distances typed over the photos, beside a measuring tape or along the
 box drawn around the repair, with the billed dimensions. This only adds weight: agreement is
 noted, and a disagreement turns a PASS into REVIEW. A report with no such labels is checked as
 before.
+
+Check 5 needs only the mastersheet, so it runs even where the evidence is missing. The rates
+come from the contract's rate schedule in `price/` (see below).
 
 Results are **PASS**, **FLAG** (the evidence contradicts the mastersheet), **REVIEW** (it could
 not be read well enough to decide — usually hand-writing, so it needs eyes, not suspicion),
@@ -80,6 +84,26 @@ Photo batches have no OIC page, so check 4 reports N/A, and quantities come from
 dimensions hand-written on the board in the photos. A batch matching neither format stops
 with an error rather than guessing.
 
+## Rate schedules
+
+Check 5 reads the contract's Bill of Quantities from a `price/` folder next to `app.py`:
+
+```
+price/
+  RM206_Rate_Sec A & B 1.xls              .xls workbook
+  TR388_CHC_Price_SOT_Extension.pdf       or a PDF with a text layer
+```
+
+Only Section B — *Provisional quantities for ad hoc works* — is read, since that is what the
+mastersheet's PQ items refer to. A schedule is matched to a batch by the contract code in the
+mastersheet (`RM206`). The TR388 mastersheet names no contract, so it is matched by region
+instead: its NW1–NW3 sectors are the schedule's "North West sector".
+
+A contract with no schedule in the folder reports N/A. So far that is RM205 and TR387. A
+schedule that states a period, like the TR388 2026–2028 extension, only judges work completed
+inside it. For earlier work the rates are shown but not judged, and the check reports N/A
+unless the arithmetic or a unit is wrong. `price/` is not committed.
+
 ## Code
 
 Reading documents is kept apart from judging them, so a new contract needs a new reader, not
@@ -88,7 +112,8 @@ changes to the checks.
 - `checker/readers.py` — turns a batch into mastersheet items plus evidence, and picks the format
 - `checker/mastersheet.py`, `report.py` — the RM formats; `photo_folder_format.py` — the photo format; `bundled_pdf_format.py` — the bundle format
 - `checker/photos.py` — watermark dates, AFTER photos, board dimensions
-- `checker/checks.py` — the four checks; knows nothing about page layouts
+- `checker/prices.py` — reads the rate schedules in `price/` and picks the one a mastersheet is billed against
+- `checker/checks.py` — the five checks; knows nothing about page layouts
 - `checker/common.py`, `cache.py`, `parallel.py` — OCR, remembered results, worker pool
 - `app.py` — the interface
 

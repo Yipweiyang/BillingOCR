@@ -1,13 +1,15 @@
 """
-Checks 1-4 on the records produced by a reader (see readers.py), and the
+Checks 1-5 on the records produced by a reader (see readers.py), and the
 workflow that runs them. Nothing here opens a PDF or knows a page layout.
 """
+import os
 from collections import Counter
 from itertools import permutations
 
 from .common import area_total, close, fmt_date, ocr_image
 from .photos import (board_area_rescan, board_confirms, board_confirms_area, dims_match,
                      is_app_screenshot, load_photo, parse_timestamp)
+from .prices import price_list_for, same_unit
 from .readers import read_batch
 
 PASS, FLAG, NA = "PASS", "FLAG", "N/A"
@@ -357,8 +359,74 @@ def check_oic(oic):
     return (PASS if oic["found"] else FLAG), oic["detail"]
 
 
+# ---------- Check 5: prices ----------
+def money(x):
+    return f"${x:,.2f}"
+
+
+def check_prices(jobs, completed, price_list):
+    """
+    Each mastersheet line against the contract's rate schedule: the unit
+    rate billed is the scheduled one, and QTY x rate is the total billed.
+
+    A schedule has a period - TR388's is a contract extension - and work
+    done outside it was priced under another schedule, so its rates are
+    shown but not judged. Arithmetic that does not add up, or a unit that
+    is not the item's, is wrong whichever schedule applies.
+    """
+    contract = (price_list or {}).get("contract")
+    schedule = (price_list or {}).get("schedule")
+    if schedule is None:
+        return NA, f"No rate schedule for {contract or 'this contract'} in the price folder"
+    if not jobs:
+        return NA, "No PQ lines to price"
+
+    start, end = schedule["valid_from"], schedule["valid_to"]
+    outside = completed is not None and ((start and completed < start) or (end and completed > end))
+    wrong, doubts, unjudged, total = [], [], [], 0.0
+
+    for j in jobs:
+        pq, qty, billed, unit = j["pq"], j["qty"], j.get("rate"), j.get("unit")
+        entry = schedule["items"].get(pq.upper())
+        if entry is None:
+            doubts.append(f"{pq} is not in the {contract} rate schedule")
+            continue
+        rate = entry["rate"]
+        if billed is None:
+            doubts.append(f"{pq} unit rate unreadable (schedule {money(rate)})")
+        elif not close(billed, rate, tol=0.005):
+            (unjudged if outside else wrong).append(f"{pq} billed at {money(billed)}, schedule {money(rate)}")
+        if unit and entry["unit"] and not same_unit(unit, entry["unit"]):
+            doubts.append(f"{pq} billed per {unit}, scheduled per {entry['unit']}")
+
+        amount = j.get("amount")
+        if amount is not None and qty is not None and billed is not None:
+            # Totals are printed to the cent, so 1.68 x $36.10 = $60.648 is billed as $60.65.
+            if not close(amount, qty * billed, tol=0.011):
+                wrong.append(f"{pq} total {money(amount)}, but {qty:g} x {money(billed)} = {money(qty * billed)}")
+            total += amount
+
+    notes = []
+    if outside:
+        notes.append(f"completed {fmt_date(completed)}, outside the {contract} schedule's period "
+                     f"{fmt_date(start)} to {fmt_date(end)}, so rates are not judged"
+                     + (": " + " | ".join(unjudged) if unjudged else ""))
+
+    def bracket(xs):
+        return " [" + "; ".join(xs) + "]" if xs else ""
+
+    if wrong:
+        return FLAG, " | ".join(wrong) + bracket(doubts + notes)
+    if doubts:
+        return REVIEW, " | ".join(doubts) + bracket(notes)
+    if unjudged:
+        return NA, notes[0][0].upper() + notes[0][1:]
+    return PASS, f"{len(jobs)} line(s) at {contract} schedule rates, total {money(total)}{bracket(notes)}"
+
+
 # ---------- Full workflow ----------
-def run_checks(items, evidence, evidence_name="incident report", progress=None):
+def run_checks(items, evidence, evidence_name="incident report", progress=None, price_list=None):
+    """price_list is prices.price_list_for(mastersheet); without one, check 5 is N/A."""
     counts = Counter(e["key"] for e in evidence if e["key"])
     by_key = {}
     for e in evidence:
@@ -397,7 +465,10 @@ def run_checks(items, evidence, evidence_name="incident report", progress=None):
             c3, d3 = check_after_dates(e["after_photos"], m["date"])
             c4, d4 = check_oic(e["oic"])
 
-        row = {"S/N": m["sn"], "Defect Ref": m.get("ref", key)}
+        # The mastersheet alone is priced, so this runs whatever the evidence.
+        c5, d5 = check_prices(m["jobs"], m["date"], price_list)
+
+        row ={"S/N": m["sn"], "Defect Ref": m.get("ref", key)}
         if "sector" in m:
             row["Sector"] = m["sector"]
         if "location" in m:
@@ -407,6 +478,7 @@ def run_checks(items, evidence, evidence_name="incident report", progress=None):
             "Check 2": c2, "Check 2 Detail": d2,
             "Check 3": c3, "Check 3 Detail": d3,
             "Check 4": c4, "Check 4 Detail": d4,
+            "Check 5": c5, "Check 5 Detail": d5,
         })
         rows.append(row)
 
@@ -441,4 +513,7 @@ def check_batch(batch_dir, progress=None):
         return (lambda done, total: progress(name, done, total)) if progress else None
 
     items, evidence, evidence_name = read_batch(batch_dir, phase("Reading evidence"))
-    return run_checks(items, evidence, evidence_name, phase("Running checks"))
+    name = os.path.basename(os.path.normpath(batch_dir))
+    with open(os.path.join(batch_dir, name + ".pdf"), "rb") as f:
+        price_list = price_list_for(f.read())
+    return run_checks(items, evidence, evidence_name, phase("Running checks"), price_list)

@@ -19,6 +19,13 @@ MASTER_COLUMNS = {
     "qty": ("QTY",),
 }
 DEFAULT_COLUMNS = {"sn": 0, "date": 2, "ref": 4, "pq": 11, "length": 12, "width": 13, "qty": 15}
+# What each line is billed at, for the price check. Not needed to recognise
+# the header: a sheet without them is still checked, just not priced.
+PRICE_COLUMNS = {
+    "unit": ("UNIT",),
+    "rate": ("UNIT RATE",),
+    "amount": ("A",),  # headed "A" over "TOTAL COST (PQ)"
+}
 
 
 def header_match(row, wanted=MASTER_COLUMNS):
@@ -74,7 +81,7 @@ def parse_master(pdf_bytes):
                 for i, raw in enumerate(rows):
                     found = header_match(raw)
                     if len(found) == len(MASTER_COLUMNS):
-                        cols, seen_header = found, True
+                        cols, seen_header = {**found, **header_match(raw, PRICE_COLUMNS)}, True
                         continue
                     if len(found) >= 3:  # a header row, but reworded
                         near_miss = sorted(set(MASTER_COLUMNS) - set(found))
@@ -96,11 +103,15 @@ def parse_master(pdf_bytes):
                         records[ref] = {"sn": int(sn), "date": cdate, "jobs": []}
 
                     if current:
+                        cell = lambda f: row[cols[f]] if f in cols else None  # noqa: E731
                         records[current]["jobs"].append({
                             "pq": pqm.group(0).upper(),
                             "length": num(row[cols["length"]]),
                             "width": num(row[cols["width"]]),
                             "qty": num(row[cols["qty"]]),
+                            "unit": " ".join((cell("unit") or "").split()) or None,
+                            "rate": num(cell("rate")),
+                            "amount": num(cell("amount")),
                         })
 
     doc.close()

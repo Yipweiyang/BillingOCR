@@ -22,7 +22,7 @@ import pdfplumber
 from PIL import Image
 
 from .common import close, num, ocr_image, parse_date
-from .mastersheet import header_columns
+from .mastersheet import header_columns, header_match
 from .parallel import pmap
 from .photos import native_image, parse_timestamp, photo_distances
 from .photo_folder_format import normalise_place
@@ -39,6 +39,11 @@ TR388_COLUMNS = {
     "pq": ("PQ / SOR / FSR ITEM",),
     "qty": ("QUANTITY",),
     "unit": ("UNIT",),
+}
+# What each line is billed at, for the price check; optional like the RM ones.
+TR388_PRICE_COLUMNS = {
+    "rate": ("UNIT RATE (PQ)",),
+    "amount": ("TOTAL COST (PQ)",),
 }
 # "15612W-#13639", "NW2-15970W", "16097E #13957": the D.No is the number
 # directly followed by E or W.
@@ -100,12 +105,12 @@ def parse_tr388_master(pdf_bytes):
                 for raw in table:
                     found = header_columns(raw, TR388_COLUMNS)
                     if found:
-                        cols = found
+                        cols = {**found, **header_match(raw, TR388_PRICE_COLUMNS)}
                         continue
                     if cols is None:
                         continue
                     row = list(raw) + [None] * (max(cols.values()) + 1 - len(raw))
-                    cell = lambda f: " ".join((row[cols[f]] or "").split())  # noqa: E731
+                    cell = lambda f: " ".join((row[cols[f]] or "").split()) if f in cols else ""  # noqa: E731
                     code = pq_code(cell("pq"))
                     if cell("sn").isdigit():
                         number = dno(cell("dno"))
@@ -124,7 +129,8 @@ def parse_tr388_master(pdf_bytes):
                         })
                     if code and rows:
                         rows[-1]["jobs"].append({"pq": code, "length": None, "width": None,
-                                                 "qty": num(cell("qty")), "unit": cell("unit") or None})
+                                                 "qty": num(cell("qty")), "unit": cell("unit") or None,
+                                                 "rate": num(cell("rate")), "amount": num(cell("amount"))})
 
     counts = {}
     for r in rows:
