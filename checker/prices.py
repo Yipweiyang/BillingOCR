@@ -15,6 +15,7 @@ import functools
 import io
 import os
 import re
+from datetime import date
 
 import fitz
 import pdfplumber
@@ -191,44 +192,103 @@ def _read(path):
 
 @functools.lru_cache(maxsize=4)
 def _load(folder, stamp):
-    schedules = {}
+    """({contract: [schedule, ...]}, [(filename, why)]) - the second is what was not usable."""
+    schedules, rejected = {}, []
     for name in sorted(os.listdir(folder)):
         if not name.lower().endswith((".pdf", ".xls")):
             continue
-        schedule = _read(os.path.join(folder, name))
+        try:
+            schedule = _read(os.path.join(folder, name))
+        except Exception as e:
+            rejected.append((name, f"could not be read ({e})"))
+            continue
         # The file name is the fallback when the schedule never states its contract.
         contract = schedule["contract"] or contract_code(name)
-        if contract and schedule["items"]:
-            schedules[contract] = {**schedule, "contract": contract, "source": name}
-    return schedules
+        if not contract:
+            rejected.append((name, "names no contract, and none could be read from its file name"))
+            continue
+        if not schedule["items"]:
+            rejected.append((name, f"no priced items found under '{SECTION_B}'"))
+            continue
+        schedules.setdefault(contract, []).append({**schedule, "contract": contract, "source": name})
+
+    # Oldest first, so the newest schedule wins where two cover the same day.
+    for group in schedules.values():
+        group.sort(key=lambda s: (s["valid_from"] or date.min, s["source"]))
+    return schedules, tuple(rejected)
 
 
-def load_schedules(folder=PRICE_DIR):
-    """{contract: schedule} for every rate schedule in the folder, or {} if there is none."""
+def _loaded(folder=PRICE_DIR):
     if not os.path.isdir(folder):
-        return {}
+        return {}, ()
     stamp = tuple((e.name, e.stat().st_mtime) for e in os.scandir(folder))
     return _load(folder, stamp)
 
 
+def load_schedules(folder=PRICE_DIR):
+    """
+    {contract: [schedule, ...]} for every rate schedule in the folder, or {}.
+
+    A contract accumulates schedules - an original and its extensions - so
+    each one keeps its own entry rather than the last read silently
+    replacing the ones before it.
+    """
+    return _loaded(folder)[0]
+
+
+def rejected_files(folder=PRICE_DIR):
+    """[(filename, why)] for the price files that could not be used."""
+    return list(_loaded(folder)[1])
+
+
+def covers(schedule, day):
+    start, end = schedule["valid_from"], schedule["valid_to"]
+    return not ((start and day < start) or (end and day > end))
+
+
+def schedule_for(schedules, completed):
+    """
+    The schedule that priced work finished on `completed`.
+
+    With none covering that day the work was priced under a schedule the
+    folder does not hold, so the closest is returned and check 5 shows its
+    rates without judging them.
+    """
+    if not schedules:
+        return None
+    if completed is not None:
+        covering = [s for s in schedules if covers(s, completed)]
+        if covering:
+            return covering[-1]
+    undated = [s for s in schedules if not s["valid_from"] and not s["valid_to"]]
+    return (undated or schedules)[-1]
+
+
 def price_list_for(master_bytes, schedules=None):
     """
-    The rate schedule a mastersheet is billed against:
-    {"contract": code or None, "schedule": schedule or None}.
+    The rate schedules a mastersheet is billed against:
+    {"contract": code or None, "schedules": [...], "rejected": [...]}.
+
+    A contract may have several, so check 5 picks the one covering each
+    line's completion date; "rejected" names the price files that could
+    not be used, so they are reported rather than quietly ignored.
 
     Most mastersheets name their contract (RM205, RM206, TR387). The TR388
     one does not, so a sheet naming none is matched by the region of its
     sectors - NW1 is the North West sector - when exactly one schedule
     covers that region.
     """
-    schedules = load_schedules() if schedules is None else schedules
+    rejected = []
+    if schedules is None:
+        schedules, rejected = load_schedules(), rejected_files()
     with fitz.open(stream=master_bytes, filetype="pdf") as doc:
         text = " ".join(page.get_text() for page in doc)
 
     contract = contract_code(text)
     if contract is None:
         regions = {SECTOR_REGIONS[s] for s in SECTOR_RE.findall(text.upper())}
-        matches = [c for c, s in schedules.items() if s.get("region") in regions]
+        matches = [c for c, group in schedules.items()
+                   if any(s.get("region") in regions for s in group)]
         if len(matches) == 1:
             contract = matches[0]
-    return {"contract": contract, "schedule": schedules.get(contract)}
+    return {"contract": contract, "schedules": schedules.get(contract, []), "rejected": rejected}

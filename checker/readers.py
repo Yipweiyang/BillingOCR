@@ -184,26 +184,70 @@ def _read(path):
         return f.read()
 
 
-def read_batch(batch_dir, progress=None):
+def looks_like_master(pdf_bytes):
+    """True when a PDF carries any known format's mastersheet table header."""
+    return is_tr388_master(pdf_bytes) or is_tr387_master(pdf_bytes) or is_rm_master(pdf_bytes)
+
+
+def find_master(batch_dir, pdfs):
     """
-    A batch folder holds the mastersheet PDF, named after the folder, and
-    its evidence. The format is recognised from what else is in the folder.
-    Returns (items, evidence, what one piece of evidence is called).
+    The batch's mastersheet, as (filename, bytes).
+
+    A folder whose mastersheet is named after it says so outright, and that
+    is taken at its word. Otherwise every PDF is tried, because the names a
+    batch arrives under are whoever assembled it, not a convention we can
+    impose: the mastersheet is the one carrying a known table header, and
+    evidence never does.
     """
     name = os.path.basename(os.path.normpath(batch_dir))
-    master = os.path.join(batch_dir, name + ".pdf")
-    if not os.path.isfile(master):
-        raise ValueError(f"No mastersheet found: expected '{name}.pdf' inside the batch folder")
+    named = name + ".pdf"
+    if named in pdfs:
+        data = _read(os.path.join(batch_dir, named))
+        if looks_like_master(data):
+            return named, data
 
-    report_pdfs = sorted(f for f in os.listdir(batch_dir)
-                         if f.lower().endswith(".pdf") and f != name + ".pdf")
+    found = []
+    for f in pdfs:
+        if f == named:
+            continue
+        data = _read(os.path.join(batch_dir, f))
+        if looks_like_master(data):
+            found.append((f, data))
+
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        raise ValueError(
+            f"No mastersheet found in '{name}': none of its {len(pdfs)} PDF(s) carries an "
+            f"RM205/RM206, TR387 or TR388 mastersheet table header.")
+    raise ValueError(
+        f"Several files in '{name}' look like a mastersheet: "
+        f"{', '.join(f for f, _ in found)}. Leave exactly one in the folder.")
+
+
+def read_batch(batch_dir, progress=None):
+    """
+    A batch folder holds the mastersheet PDF and its evidence. Both the
+    mastersheet and the format are recognised from the files themselves,
+    so nothing depends on how the batch was named.
+    Returns (items, evidence, what one piece of evidence is called, the
+    mastersheet's bytes) - the last so a caller need not find it again.
+    """
+    name = os.path.basename(os.path.normpath(batch_dir))
+    pdfs = sorted(f for f in os.listdir(batch_dir) if f.lower().endswith(".pdf"))
+    if not pdfs:
+        raise ValueError(f"No mastersheet found in '{name}': the folder holds no PDF at all.")
+
+    master_name, master = find_master(batch_dir, pdfs)
+
+    report_pdfs = [f for f in pdfs if f != master_name]
     if report_pdfs:
         reports = [(f, _read(os.path.join(batch_dir, f))) for f in report_pdfs]
-        return read_uploads(_read(master), reports, progress=progress)
+        return read_uploads(master, reports, progress=progress) + (master,)
 
     if photo_folders(batch_dir):
-        items, evidence = read_tr387_batch(batch_dir, _read(master), progress=progress)
-        return items, evidence, "photo folder"
+        items, evidence = read_tr387_batch(batch_dir, master, progress=progress)
+        return items, evidence, "photo folder", master
 
     raise ValueError(f"Unsupported batch format in '{name}': no incident report PDFs "
                      f"and no photo folders named by S/N")

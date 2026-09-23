@@ -104,6 +104,15 @@ schedule that states a period, like the TR388 2026–2028 extension, only judges
 inside it. For earlier work the rates are shown but not judged, and the check reports N/A
 unless the arithmetic or a unit is wrong. `price/` is not committed.
 
+**A contract may have several schedules** — an original and its extensions — and the folder can
+hold them all. Each line is priced against the schedule covering its completion date, so one
+batch spanning a renewal is judged correctly throughout, and the result names the schedule it
+used. Drop a new sheet in beside the old one; nothing needs renaming or removing.
+
+A price file that cannot be read, names no contract, or yields no Section B items is **not**
+silently skipped: check 5 names it and says why, so a sheet in an unexpected shape shows up as
+a message rather than as every row quietly reporting N/A.
+
 ## Code
 
 Reading documents is kept apart from judging them, so a new contract needs a new reader, not

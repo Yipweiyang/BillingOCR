@@ -9,7 +9,7 @@ from itertools import permutations
 from .common import area_total, close, fmt_date, ocr_image
 from .photos import (board_area_rescan, board_confirms, board_confirms_area, dims_match,
                      is_app_screenshot, load_photo, parse_timestamp)
-from .prices import price_list_for, same_unit
+from .prices import price_list_for, same_unit, schedule_for
 from .readers import read_batch
 
 PASS, FLAG, NA = "PASS", "FLAG", "N/A"
@@ -33,6 +33,30 @@ def measurement_distance(a, b):
     return score
 
 
+# Trying every permutation is exact but factorial: 8 jobs is 40 thousand
+# orderings, 12 is 479 million. Items that large do not occur - the most
+# seen in a batch so far is 2 - so the exact search is kept for the sizes
+# that happen and a greedy pairing takes over beyond it, rather than the
+# run stopping dead on one unusual item.
+MAX_EXACT_ALIGN = 8
+
+
+def best_alignment(master_jobs, sketch_jobs):
+    """The order of sketch_jobs that best matches master_jobs, as indices."""
+    n = len(master_jobs)
+    if n <= MAX_EXACT_ALIGN:
+        return min(permutations(range(n)),
+                   key=lambda p: sum(measurement_distance(master_jobs[i], sketch_jobs[p[i]])
+                                     for i in range(n)))
+
+    free, perm = set(range(n)), []
+    for i in range(n):
+        j = min(free, key=lambda j: measurement_distance(master_jobs[i], sketch_jobs[j]))
+        free.discard(j)
+        perm.append(j)
+    return perm
+
+
 def compare_measurements(master_jobs, sketch_jobs):
     """
     Cross-check the individual 'L x W = Q' lines in the sketch against the
@@ -44,8 +68,7 @@ def compare_measurements(master_jobs, sketch_jobs):
     if n == 0 or len(sketch_jobs) != n:
         return None
 
-    perm = min(permutations(range(n)),
-               key=lambda p: sum(measurement_distance(master_jobs[i], sketch_jobs[p[i]]) for i in range(n)))
+    perm = best_alignment(master_jobs, sketch_jobs)
 
     errors = []
     for i in range(n):
@@ -375,9 +398,16 @@ def check_prices(jobs, completed, price_list):
     is not the item's, is wrong whichever schedule applies.
     """
     contract = (price_list or {}).get("contract")
-    schedule = (price_list or {}).get("schedule")
+    schedules = (price_list or {}).get("schedules") or []
+    rejected = (price_list or {}).get("rejected") or []
+    # A contract accumulates schedules, so the one covering this line's
+    # completion date is the one it should have been billed against.
+    schedule = schedule_for(schedules, completed)
     if schedule is None:
-        return NA, f"No rate schedule for {contract or 'this contract'} in the price folder"
+        detail = f"No rate schedule for {contract or 'this contract'} in the price folder"
+        if rejected:
+            detail += "; unusable: " + "; ".join(f"{name} - {why}" for name, why in rejected)
+        return NA, detail
     if not jobs:
         return NA, "No PQ lines to price"
 
@@ -408,8 +438,10 @@ def check_prices(jobs, completed, price_list):
 
     notes = []
     if outside:
+        held = (f", and none of the {len(schedules)} {contract} schedules in the price folder covers it"
+                if len(schedules) > 1 else "")
         notes.append(f"completed {fmt_date(completed)}, outside the {contract} schedule's period "
-                     f"{fmt_date(start)} to {fmt_date(end)}, so rates are not judged"
+                     f"{fmt_date(start)} to {fmt_date(end)}{held}, so rates are not judged"
                      + (": " + " | ".join(unjudged) if unjudged else ""))
 
     def bracket(xs):
@@ -421,6 +453,8 @@ def check_prices(jobs, completed, price_list):
         return REVIEW, " | ".join(doubts) + bracket(notes)
     if unjudged:
         return NA, notes[0][0].upper() + notes[0][1:]
+    if len(schedules) > 1:
+        notes.append(f"priced against {schedule['source']}")
     return PASS, f"{len(jobs)} line(s) at {contract} schedule rates, total {money(total)}{bracket(notes)}"
 
 
@@ -512,8 +546,6 @@ def check_batch(batch_dir, progress=None):
     def phase(name):
         return (lambda done, total: progress(name, done, total)) if progress else None
 
-    items, evidence, evidence_name = read_batch(batch_dir, phase("Reading evidence"))
-    name = os.path.basename(os.path.normpath(batch_dir))
-    with open(os.path.join(batch_dir, name + ".pdf"), "rb") as f:
-        price_list = price_list_for(f.read())
+    items, evidence, evidence_name, master = read_batch(batch_dir, phase("Reading evidence"))
+    price_list = price_list_for(master)
     return run_checks(items, evidence, evidence_name, phase("Running checks"), price_list)
