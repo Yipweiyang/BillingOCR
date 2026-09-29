@@ -4,7 +4,7 @@ from itertools import combinations
 
 import fitz
 
-from .common import PQ_RE, close, norm_ref, ocr_image, page_text_with_ocr, ref_number
+from .common import PQ_RE, close, norm_ref, ocr_image, page_text_with_ocr, ref_number, sketch_sizes, sketch_text
 from .photos import after_images, native_image, photo_distances
 
 MEAS_RE = re.compile(
@@ -72,7 +72,7 @@ def report_ref(doc, filename, expected_refs=None):
 
 
 def measurements(page):
-    text = page.get_text("text").replace("\n", " ")
+    text = sketch_text(page)
     out = []
     # "2.2m x 2.1m - 1m x 0.85m = 3.77m2": the gross dimensions with the
     # deduction already taken off. Taken first and blanked out so MEAS_RE
@@ -273,11 +273,11 @@ def oic_record(doc, own_ref=None):
             if skip_other_defects and own_ref and named and named != own_ref:
                 continue
             if looks_like_oic_instruction(text):
-                return {"found": True, "detail": f"OIC instruction/supporting page detected on page {pno + 1}"}
+                return {"found": True, "detail": f"OIC instruction found on page {pno + 1}."}
     if not candidates:
-        return {"found": False, "detail": "Every page after the sketch holds photos; no OIC instruction found"}
+        return {"found": False, "detail": "No OIC instruction found: every page after the sketch is photos."}
     pages = ", ".join(str(pno + 1) for pno in candidates)
-    return {"found": False, "detail": f"No clear OIC instruction on page {pages}"}
+    return {"found": False, "detail": f"No OIC instruction found. Page {pages} may hold it but is unclear - please check."}
 
 
 def parse_report(pdf_bytes, filename, expected_refs=None):
@@ -292,6 +292,7 @@ def parse_report(pdf_bytes, filename, expected_refs=None):
             "source": filename,
             "claimed_jobs": item_box_jobs(doc[0]),
             "sketch_jobs": attach_pq(ms, pcs),
+            "sketch_sizes": sketch_sizes(doc[0]),
             "after_photos": after_photos(doc),
             "photo_dims": [d for pno in range(1, len(doc)) for d in photo_distances(doc[pno], pno)],
             "oic": oic_record(doc, ref),

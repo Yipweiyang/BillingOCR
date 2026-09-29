@@ -217,11 +217,17 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# data folders
-data/
+# data folders (keep the folder, ignore contents)
+data/*
+!data/.gitkeep
 
 # OCR cache (rebuilt on demand)
 .ocr_cache/
 
-# price
-price/
+# price (keep the folder, ignore contents)
+price/*
+!price/.gitkeep
+
+# grating (keep the folder, ignore contents)
+grating/*
+!grating/.gitkeep

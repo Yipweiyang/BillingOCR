@@ -99,6 +99,54 @@ def close(a, b, tol=NUM_TOL):
     return a is not None and b is not None and abs(a - b) <= tol
 
 
+# A size in a sketch: "1.4m x 0.2m", "0.3m x 0.3m 5 Nos", with or without "= 0.28m2" after it.
+SIZE_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*m?\s*[xX×]\s*(\d+(?:\.\d+)?)\s*m?(?:\s*[xX×]?\s*(\d+)\s*Nos?\b\.?)?", re.I)
+
+
+def visible_text(page):
+    """
+    The page's text without what an image drawn later covers. A report
+    built from a copy of another keeps that one's QUANTITY lines in the text
+    layer, hidden under the new map.
+    """
+    log = page.get_bboxlog()
+    images = [(fitz.Rect(r), i) for i, (kind, r) in enumerate(log) if kind == "fill-image"]
+    texts = [(fitz.Rect(r), i) for i, (kind, r) in enumerate(log) if kind == "fill-text"]
+
+    def hidden(w):
+        c = fitz.Point((w[0] + w[2]) / 2, (w[1] + w[3]) / 2)
+        drawn = max((i for r, i in texts if r.contains(c)), default=-1)
+        return any(i > drawn and r.contains(c) for r, i in images)
+
+    return " ".join(w[4] for w in page.get_text("words") if not hidden(w))
+
+
+def sketch_text(page):
+    """
+    The text a reader sees on a sketch page. Some reports draw the QUANTITY
+    lines in a font with no text mapping, so a page whose text layer gives
+    no size is read by OCR instead. Every reading of the sketch goes
+    through here, so the checks all see the same sketch.
+    """
+    text = visible_text(page)
+    if not SIZE_RE.search(text):
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.5, 2.5), alpha=False)
+        text = ocr_image(Image.open(io.BytesIO(pix.tobytes("png"))))
+    return text
+
+
+def sketch_sizes(page):
+    """Every 'L x W' on a sketch page, deductions included, as [{"length", "width", "qty"}]."""
+    out = []
+    for m in SIZE_RE.finditer(sketch_text(page)):
+        length, width = float(m.group(1)), float(m.group(2))
+        size = {"length": length, "width": width, "qty": length * width * int(m.group(3) or 1)}
+        if size not in out:
+            out.append(size)
+    return out
+
+
 def area_total(areas):
     """Net area of [{length, width, count, sign}], deductions (sign -1) taken off."""
     return sum(a["sign"] * a["length"] * a["width"] * a.get("count", 1) for a in areas)

@@ -2,8 +2,9 @@
 Contract rate schedules from the price/ folder, and the batch each one
 belongs to.
 
-A schedule is the contract's Bill of Quantities: an .xls workbook (RM206)
-or a PDF (TR388). Only Section B - the provisional quantities for ad hoc
+A schedule is the contract's Bill of Quantities: an .xls workbook (RM206),
+an .xlsb price list (TR387) or a PDF (TR388, and RM205's whole contract
+document). In the BQs only Section B - the provisional quantities for ad hoc
 works - is read, because that is what a mastersheet's PQ items refer to;
 Section A reuses the same item numbers for planned works at other rates.
 
@@ -12,6 +13,7 @@ Section A reuses the same item numbers for planned works at other rates.
      "items": {"PQ30.1.1": {"rate", "unit", "description"}}}
 """
 import functools
+import hashlib
 import io
 import os
 import re
@@ -31,6 +33,12 @@ SECTOR_REGIONS = {"NE": "NORTH EAST", "NW": "NORTH WEST", "SE": "SOUTH EAST", "S
 # "EXTENSION FROM 6 FEBRUARY 2026 TO 5 FEBRUARY 2028"
 VALIDITY_RE = re.compile(r"FROM\s+(\d{1,2}\s+[A-Z]+\s+\d{4})\s+TO\s+(\d{1,2}\s+[A-Z]+\s+\d{4})", re.I)
 SECTION_B = "PROVISIONAL QUANTITIES FOR AD HOC WORKS"
+OPTION_BILL = "OPTION BILL"
+# The area a PQ item is for, as its description words it:
+# "for locations with each area <= 2m2", "... exceeding 2m2 but n.e. 5m2",
+# "... area excceding 5m2" (sic).
+AT_MOST_RE = re.compile(r"(?:≤|<=)\s*(\d+(?:\.\d+)?)\s*m2", re.I)
+EXCEEDING_RE = re.compile(r"exc+e+ding\s*(\d+(?:\.\d+)?)\s*m2(?:\s*but\s*n\.?\s*e\.?\s*(\d+(?:\.\d+)?)\s*m2)?", re.I)
 
 ITEM_RE = re.compile(r"^\d+(?:\.\d+)+$")
 # A sub-item is lettered under the last numbered item: "a)", "a" or "a.".
@@ -52,10 +60,31 @@ def pq_key(code, letter=""):
     return f"PQ{code}{letter}".upper()
 
 
+def area_band(description):
+    """
+    (above, up_to) in m2 for an item priced by the size of the location -
+    above is exclusive, up_to inclusive, either may be None - or None for
+    an item that names no size.
+    """
+    m = EXCEEDING_RE.search(description or "")
+    if m:
+        return float(m.group(1)), float(m.group(2)) if m.group(2) else None
+    m = AT_MOST_RE.search(description or "")
+    if m:
+        return None, float(m.group(1))
+    return None
+
+
 def same_unit(a, b):
-    """'m2' and 'm²', 'nos' and 'no.' are the same unit."""
+    """
+    'm2' and 'm²', 'nos' and 'no.' are the same unit. So are m3 and m2:
+    every PQ item billed here is an area, and 'm3' on a mastersheet is a
+    typing slip for m2, not a volume.
+    """
     def norm(u):
         u = re.sub(r"[\s.]", "", (u or "").lower()).replace("²", "2").replace("³", "3")
+        if u == "m3":
+            return "m2"
         return "no" if u in ("no", "nos", "nr") else u
     return norm(a) == norm(b)
 
@@ -148,6 +177,55 @@ def read_xls(data):
     return schedule
 
 
+# ---------- .xlsb ----------
+# TR387's workbook keeps its rates on a price-list sheet headed
+# ITEM / PAGE / DESCRIPTION OF WORKS / UNIT / RATE, each row carrying its
+# full code ("PQ30.1.1", "PQ30.2.1a1") rather than a letter under a number.
+# The prefix keeps PQ, FSR and SOR items apart, so all three are read - a
+# mastersheet bills labour (FSR16.1.1) alongside the PQ works.
+# A letter may follow a dot, as in "PQ30.6.b".
+PRICED_CODE_RE = re.compile(r"^(?:PQ|FSR)\d+(?:\.\d+)*(?:\.?[A-Za-z]\d*)?$|^SOR\.[A-Z]+\d+$", re.I)
+
+
+def read_xlsb(data):
+    from pyxlsb import open_workbook
+
+    with open_workbook(io.BytesIO(data)) as book:
+        sheets = []
+        for name in book.sheets:
+            with book.get_sheet(name) as sheet:
+                sheets.append([[c.v for c in row] for row in sheet.rows()])
+
+    def cell(row, j):
+        return " ".join(str(row[j]).split()) if j < len(row) and row[j] is not None else ""
+
+    schedule = {"contract": None, "region": None, "valid_from": None, "valid_to": None, "items": {}}
+    for rows in sheets:
+        cols = None
+        for row in rows:
+            upper = [cell(row, j).upper() for j in range(len(row))]
+            if cols is None:
+                if "ITEM" in upper and "UNIT" in upper and any(c.startswith("RATE") for c in upper):
+                    cols = {"code": upper.index("ITEM"), "unit": upper.index("UNIT"),
+                            "rate": next(j for j, c in enumerate(upper) if c.startswith("RATE")),
+                            "desc": next((j for j, c in enumerate(upper) if c.startswith("DESCRIPTION")), None)}
+                    # The contract and region are named in the lines above the header.
+                    above = " ".join(" ".join(cell(r, j) for j in range(len(r))) for r in rows[:rows.index(row)])
+                    region = REGION_RE.search(above)
+                    schedule["contract"] = contract_code(above)
+                    schedule["region"] = " ".join(region.groups()).upper() if region else None
+                continue
+            code = cell(row, cols["code"])
+            rate = row[cols["rate"]] if cols["rate"] < len(row) else None
+            if PRICED_CODE_RE.match(code) and isinstance(rate, (int, float)) and rate > 0:
+                schedule["items"].setdefault(code.upper(), {
+                    "rate": float(rate), "unit": cell(row, cols["unit"]) or None,
+                    "description": cell(row, cols["desc"]) if cols["desc"] is not None else ""})
+        if schedule["items"]:
+            break
+    return schedule
+
+
 # ---------- PDF ----------
 def read_pdf(data):
     with fitz.open(stream=data, filetype="pdf") as doc:
@@ -161,12 +239,19 @@ def read_pdf(data):
         "valid_to": parse_date(validity.group(2)) if validity else None,
     }
 
+    # pdfplumber is slow, and RM205's contract document runs to 717 pages,
+    # so the Section B pages are picked out by the quicker text layer first.
+    # Its option bill repeats Section B's items at the rates of an option
+    # the Authority may exercise, which a mastersheet does not bill.
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        wanted = [i for i, page in enumerate(doc)
+                  if SECTION_B in (text := " ".join(page.get_text().upper().split()))
+                  and OPTION_BILL not in text]
+
     found = _Items()
     with pdfplumber.open(io.BytesIO(data)) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text() or ""
-            if SECTION_B not in text.upper():
-                continue
+        for i in wanted:
+            text = pdf.pages[i].extract_text() or ""
             for line in text.splitlines():
                 line = " ".join(line.split())
                 m = PDF_LINE_RE.match(line)
@@ -183,22 +268,36 @@ def read_pdf(data):
     return schedule
 
 
-# ---------- The price folder ----------
-def _read(path):
-    with open(path, "rb") as f:
-        data = f.read()
-    return read_pdf(data) if path.lower().endswith(".pdf") else read_xls(data)
+# ---------- Loading schedules ----------
+READERS = {".pdf": read_pdf, ".xls": read_xls, ".xlsb": read_xlsb}
+
+# Parsed schedules by file content. RM205's 717-page contract document
+# takes seconds to read, and the app hands over the same upload on every run.
+_parsed = {}
 
 
-@functools.lru_cache(maxsize=4)
-def _load(folder, stamp):
-    """({contract: [schedule, ...]}, [(filename, why)]) - the second is what was not usable."""
+def _read(name, data):
+    key = hashlib.sha1(data).hexdigest()
+    if key not in _parsed:
+        if len(_parsed) >= 16:
+            _parsed.pop(next(iter(_parsed)))
+        _parsed[key] = READERS[os.path.splitext(name)[1].lower()](data)
+    return _parsed[key]
+
+
+def _collect(files):
+    """
+    ({contract: [schedule, ...]}, ((filename, why), ...)) from [(filename,
+    bytes-or-loader)] - the second is what was not usable, so no file is
+    ever skipped without a word.
+    """
     schedules, rejected = {}, []
-    for name in sorted(os.listdir(folder)):
-        if not name.lower().endswith((".pdf", ".xls")):
+    for name, data in files:
+        if os.path.splitext(name)[1].lower() not in READERS:
+            rejected.append((name, "is not a supported file type (" + ", ".join(READERS) + ")"))
             continue
         try:
-            schedule = _read(os.path.join(folder, name))
+            schedule = _read(name, data() if callable(data) else data)
         except Exception as e:
             rejected.append((name, f"could not be read ({e})"))
             continue
@@ -208,7 +307,7 @@ def _load(folder, stamp):
             rejected.append((name, "names no contract, and none could be read from its file name"))
             continue
         if not schedule["items"]:
-            rejected.append((name, f"no priced items found under '{SECTION_B}'"))
+            rejected.append((name, f"has no priced items under '{SECTION_B}'"))
             continue
         schedules.setdefault(contract, []).append({**schedule, "contract": contract, "source": name})
 
@@ -216,6 +315,20 @@ def _load(folder, stamp):
     for group in schedules.values():
         group.sort(key=lambda s: (s["valid_from"] or date.min, s["source"]))
     return schedules, tuple(rejected)
+
+
+def _file_reader(path):
+    def read():
+        with open(path, "rb") as f:
+            return f.read()
+    return read
+
+
+@functools.lru_cache(maxsize=4)
+def _load(folder, stamp):
+    """_collect() over the price folder; stamp makes a changed folder load again."""
+    names = sorted(n for n in os.listdir(folder) if not n.startswith("."))
+    return _collect([(n, _file_reader(os.path.join(folder, n))) for n in names])
 
 
 def _loaded(folder=PRICE_DIR):
@@ -234,11 +347,6 @@ def load_schedules(folder=PRICE_DIR):
     replacing the ones before it.
     """
     return _loaded(folder)[0]
-
-
-def rejected_files(folder=PRICE_DIR):
-    """[(filename, why)] for the price files that could not be used."""
-    return list(_loaded(folder)[1])
 
 
 def covers(schedule, day):
@@ -264,10 +372,15 @@ def schedule_for(schedules, completed):
     return (undated or schedules)[-1]
 
 
-def price_list_for(master_bytes, schedules=None):
+def price_list_for(master_bytes, price_files=None):
     """
     The rate schedules a mastersheet is billed against:
-    {"contract": code or None, "schedules": [...], "rejected": [...]}.
+    {"contract": code or None, "schedules": [...], "rejected": [...],
+     "where": what check 5 calls the place schedules came from}.
+
+    price_files is [(filename, bytes)], the schedules a user uploaded with
+    the batch - the app's only source, as price files are never committed.
+    Without it the price/ folder is read, for batches checked in code.
 
     A contract may have several, so check 5 picks the one covering each
     line's completion date; "rejected" names the price files that could
@@ -278,9 +391,12 @@ def price_list_for(master_bytes, schedules=None):
     sectors - NW1 is the North West sector - when exactly one schedule
     covers that region.
     """
-    rejected = []
-    if schedules is None:
-        schedules, rejected = load_schedules(), rejected_files()
+    if price_files is None:
+        schedules, rejected = _loaded()
+        where = "in the price folder"
+    else:
+        schedules, rejected = _collect(price_files)
+        where = "among the uploaded price schedules"
     with fitz.open(stream=master_bytes, filetype="pdf") as doc:
         text = " ".join(page.get_text() for page in doc)
 
@@ -291,4 +407,5 @@ def price_list_for(master_bytes, schedules=None):
                    if any(s.get("region") in regions for s in group)]
         if len(matches) == 1:
             contract = matches[0]
-    return {"contract": contract, "schedules": schedules.get(contract, []), "rejected": rejected}
+    return {"contract": contract, "schedules": schedules.get(contract, []), "rejected": list(rejected),
+            "where": where}

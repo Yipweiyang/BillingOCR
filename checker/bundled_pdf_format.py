@@ -21,7 +21,7 @@ import fitz
 import pdfplumber
 from PIL import Image
 
-from .common import close, num, ocr_image, parse_date
+from .common import close, num, ocr_image, parse_date, sketch_sizes
 from .mastersheet import header_columns, header_match
 from .parallel import pmap
 from .photos import native_image, parse_timestamp, photo_distances
@@ -205,22 +205,12 @@ def sketch_errors(page):
         for m in PRODUCT_RE.finditer(line):
             actual = float(m.group(1)) * float(m.group(2)) * (int(float(m.group(3))) if m.group(3) else 1)
             if not close(actual, float(m.group(4))):
-                errors.append(f'"{line}" should be {actual:.2f}')
+                errors.append(f'"{line}" should come to {actual:.2f}')
         for m in DIFFERENCE_RE.finditer(line):
             actual = float(m.group(1)) - float(m.group(2))
             if not close(actual, float(m.group(3))):
-                errors.append(f'"{line}" should be {actual:.2f}')
+                errors.append(f'"{line}" should come to {actual:.2f}')
     return errors
-
-
-def sketch_sizes(page):
-    """Every 'L x W =' in the sketch's Area lines, deductions included, as [{"length", "width"}]."""
-    out = []
-    for m in PRODUCT_RE.finditer(" ".join(page.get_text().split())):
-        size = {"length": float(m.group(1)), "width": float(m.group(2))}
-        if size not in out:
-            out.append(size)
-    return out
 
 
 def after_photo_images(doc, page):
@@ -238,6 +228,23 @@ def after_photo_images(doc, page):
         if below:
             out.append(min(below, key=lambda x: x[1].y0))
     return out
+
+
+def last_photo_image(page):
+    """
+    The last picture on the sheet in reading order, and the label above it.
+    Stands in for the After photo when the contractor labelled none: the
+    photos run in the order the work was done, so the last shows it finished.
+    """
+    placed = [(info[0], rect) for info in page.get_images(full=True) for rect in page.get_image_rects(info[0])]
+    if not placed:
+        return None
+    xref, rect = max(placed, key=lambda x: (round(x[1].y0 / 20), x[1].x0))
+    xc = (rect.x0 + rect.x1) / 2
+    above = [w for w in page.get_text("words")
+             if w[0] <= xc <= w[2] + 40 and rect.y0 - 30 <= w[3] <= rect.y0 + 5 and w[4].isalpha()]
+    label = max(above, key=lambda w: w[3])[4] if above else "unlabelled"
+    return xref, rect, label
 
 
 def split_incidents(doc):
@@ -277,20 +284,27 @@ def read_incident(doc, source, oic, sketch, photos):
         "claimed_jobs": item_box_jobs(page),
         "sketch_errors": sketch_errors(page),
         "sketch_sizes": sketch_sizes(page),
-        "oic": ({"found": True, "detail": f"OIC instruction screenshot on page {oic + 1}"} if oic is not None
-                else {"found": False, "detail": f"No OIC instruction page before the sketch on page {sketch + 1}"}),
+        "oic": ({"found": True, "detail": f"OIC instruction found on page {oic + 1}."} if oic is not None
+                else {"found": False, "detail": f"No OIC instruction found: expected a page before the sketch (page {sketch + 1})."}),
         "photos": [],
         "photo_dims": photo_distances(doc[photos], photos) if photos is not None else [],
     }
     if photos is not None:
-        for n, (xref, rect) in enumerate(after_photo_images(doc, doc[photos]), 1):
+        found = [(xref, rect, f"p{photos + 1} After {n}", None)
+                 for n, (xref, rect) in enumerate(after_photo_images(doc, doc[photos]), 1)]
+        last = None if found else last_photo_image(doc[photos])
+        if last:
+            xref, rect, label = last
+            found = [(xref, rect, f"the last photo on p{photos + 1} (labelled {label})", label)]
+        for xref, rect, name, stand_in in found:
             record["photos"].append({
-                "label": f"p{photos + 1} After {n}",
+                "label": name,
                 "image": native_image(doc, xref),
                 # The watermark can sit at the picture's edge, where the
                 # page crop may differ from the embedded image; the
                 # rendered picture is the fallback read.
                 "render": doc[photos].get_pixmap(clip=rect, dpi=200).tobytes("png"),
+                "stand_in": stand_in,
             })
     return record
 
@@ -311,7 +325,7 @@ def _read_after_photo(photo):
     text = ocr_image(photo["image"]) + "\n" + ocr_image(watermark_crop(photo["image"]))
     if not any(source == "watermark" for _, source, _ in parse_timestamp(text)):
         text += "\n" + ocr_image(Image.open(io.BytesIO(photo["render"])))
-    return {"label": photo["label"], "image": photo["image"], "text": text}
+    return {"label": photo["label"], "image": photo["image"], "text": text, "stand_in": photo["stand_in"]}
 
 
 def match_key(record, repeated):
@@ -324,7 +338,7 @@ def match_key(record, repeated):
 def location_note(item, record):
     master = set(normalise_place(item["location"]).split())
     report = set(normalise_place(record["location"]).split())
-    return None if master <= report else f"report '{record['location']}' vs mastersheet '{item['location']}'"
+    return None if master <= report else f"the report says '{record['location']}' but the mastersheet says '{item['location']}'"
 
 
 def read_tr388_batch(master_bytes, bundles, progress=None):

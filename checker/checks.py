@@ -9,13 +9,27 @@ from itertools import permutations
 from .common import area_total, close, fmt_date, ocr_image
 from .photos import (board_area_rescan, board_confirms, board_confirms_area, dims_match,
                      is_app_screenshot, load_photo, parse_timestamp)
-from .prices import price_list_for, same_unit, schedule_for
+from .prices import area_band, price_list_for, same_unit, schedule_for
 from .readers import read_batch
 
+# Anything a person must look at is a FLAG. Its detail says whether the
+# document is wrong or the checker could not read it well enough to tell.
 PASS, FLAG, NA = "PASS", "FLAG", "N/A"
-# The evidence could not settle it either way - typically hand-writing OCR
-# could not read or did not agree - so a person should look.
-REVIEW = "REVIEW"
+
+
+def sentence(text):
+    text = text.strip()
+    return text[:1].upper() + text[1:] + ("" if text.endswith(".") else ".")
+
+
+def as_lines(heading, problems):
+    """A heading, then each problem on a line of its own - the app shows them one per line."""
+    return heading + "".join("\n• " + sentence(p) for p in problems)
+
+
+def with_notes(detail, notes):
+    """detail, followed by each side note on a line of its own."""
+    return sentence(detail) + "".join("\nNote: " + sentence(n) for n in notes)
 
 
 # ---------- Check 2: quantities ----------
@@ -73,9 +87,10 @@ def compare_measurements(master_jobs, sketch_jobs):
     errors = []
     for i in range(n):
         a, b = master_jobs[i], sketch_jobs[perm[i]]
-        e = [f"{f} {a[f]} vs {b[f]}" for f in ("length", "width", "qty") if not close(a[f], b[f])]
+        e = [f"{f} {a[f]} on the mastersheet but {b[f]} on the sketch"
+             for f in ("length", "width", "qty") if not close(a[f], b[f])]
         if e:
-            errors.append(f"Job {i+1}: " + ", ".join(e))
+            errors.append(f"job {i+1} has " + ", ".join(e))
     return errors
 
 
@@ -83,18 +98,19 @@ def compare_board(item, readings, texts=()):
     """
     Check 2 for photo evidence: the dimensions hand-written on the site
     board against the mastersheet's areas. Hand-writing OCR is unreliable,
-    so a board that cannot be read or does not agree asks for a person to
-    look (REVIEW) instead of failing the item.
+    so a board that cannot be read or does not agree is flagged as
+    unreadable, not as wrong.
     """
     areas = item.get("areas") or []
     qty = item["jobs"][0]["qty"] if item["jobs"] else None
     if not areas:
-        return NA, "No dimensions in the mastersheet for this item (e.g. billed per hour)"
+        return NA, "The mastersheet gives no dimensions for this item (e.g. it is billed per hour)."
 
     # QTY is printed to 2 dp, so 0.25 x 0.9 = 0.225 is billed as 0.23.
     total = area_total(areas)
     if not close(total, qty, tol=0.006):
-        return FLAG, f"Mastersheet dimensions give {round(total, 3)} m2 but QTY is {qty}"
+        return FLAG, (f"Mastersheet error: its dimensions add up to {round(total, 3)} m2, "
+                      f"but it bills a quantity of {qty}.")
 
     def size(d):
         count = d.get("count", 1)
@@ -111,8 +127,8 @@ def compare_board(item, readings, texts=()):
             for a in areas:
                 line = board_confirms_area(t["text"], a)
                 if line:
-                    return PASS, (f"Board on {t['label']} reads {line!r}, which confirms mastersheet "
-                                  f"{listed} [board only partly legible]")
+                    return PASS, (f"The site board on {t['label']} shows {line!r}, matching the "
+                                  f"mastersheet's {listed}. Note: the board is only partly legible.")
         # Last resort: read the board again, larger. Only the handful of
         # items nothing else settled reach this, so the cost stays small.
         for t in texts:
@@ -121,12 +137,15 @@ def compare_board(item, readings, texts=()):
             for a in areas:
                 line = board_area_rescan(t, a)
                 if line:
-                    return PASS, (f"Board on {t['label']} reads {line!r} re-read at higher resolution, "
-                                  f"which confirms mastersheet {listed} [board only partly legible]")
+                    return PASS, (f"The site board on {t['label']} shows {line!r} (read on a zoomed-in "
+                                  f"second pass), matching the mastersheet's {listed}. "
+                                  f"Note: the board is only partly legible.")
         if not readings:
-            return REVIEW, f"No dimensions readable on the board photos (mastersheet {listed})"
+            return FLAG, (f"Could not read the handwritten dimensions on the site board photos. "
+                          f"Please check the photos show {listed}.")
         read = ", ".join(f"{size(r)} on {r['label']}" for r in readings)
-        return REVIEW, f"Board reads {read}; mastersheet has {listed}"
+        return FLAG, (f"The site board seems to show {read}, but the mastersheet has {listed}. "
+                      f"The handwriting may have been misread - please check the photos.")
 
     # Prefer a board whose tile count also agrees. Counts are only a note:
     # a long run of tiles is often split over several boards.
@@ -134,14 +153,14 @@ def compare_board(item, readings, texts=()):
     r, a = found[0]
     notes = []
     if not exact:
-        notes.append("decimal point unclear on board")
+        notes.append("the decimal point on the board is unclear")
     if r.get("count", 1) > 1 and r["count"] != a.get("count", 1):
-        notes.append(f"board shows {r['count']} nos, mastersheet {a.get('count', 1)}")
+        notes.append(f"the board shows {r['count']} nos where the mastersheet has {a.get('count', 1)}")
     seen = len({id(a) for _, a in found})
     if seen < len(areas):
-        notes.append(f"{seen} of {len(areas)} areas seen on boards")
-    detail = f"Board reads {size(r)} on {r['label']}, matching mastersheet {listed}"
-    return PASS, detail + (" [" + "; ".join(notes) + "]" if notes else "")
+        notes.append(f"only {seen} of the {len(areas)} areas appear on a board")
+    return PASS, with_notes(f"The site board on {r['label']} shows {size(r)}, "
+                            f"matching the mastersheet's {listed}", notes)
 
 
 def compare_jobs(item, evidence):
@@ -156,16 +175,20 @@ def compare_jobs(item, evidence):
     master_jobs = item["jobs"]
     item_jobs, sketch = evidence["claimed_jobs"], evidence["sketch_jobs"]
     if item_jobs is None and sketch is None:
-        return NA, "This format carries no quantities to compare"
+        return NA, "This report format has no quantities to compare."
 
     if not item_jobs:
         sketch = sketch or []
         errors = compare_measurements(master_jobs, sketch)
         if errors is None:
-            return FLAG, (f"Quantity box unreadable and sketch does not align: "
-                          f"master={len(master_jobs)} job(s), sketch={len(sketch)}")
-        return (FLAG, "Quantity box unreadable; sketch differs: " + " | ".join(errors)) if errors else (
-            PASS, f"Quantity box unreadable; {len(sketch)} sketch measurement(s) match the mastersheet")
+            return FLAG, (f"Could not read the report's quantity box, and the sketch cannot stand in for it: "
+                          f"the mastersheet has {len(master_jobs)} job(s) but the sketch has {len(sketch)}. "
+                          f"Please check the report.")
+        if errors:
+            return FLAG, as_lines("Could not read the report's quantity box, and the sketch disagrees with the "
+                                  "mastersheet:", errors)
+        return PASS, (f"Could not read the report's quantity box, but all {len(sketch)} sketch "
+                      f"measurement(s) match the mastersheet.")
 
     master_totals, report_totals = pq_totals(master_jobs), pq_totals(item_jobs)
 
@@ -173,104 +196,109 @@ def compare_jobs(item, evidence):
     for pq in sorted(set(master_totals) | set(report_totals)):
         a, b = master_totals.get(pq), report_totals.get(pq)
         if a is None:
-            errors.append(f"{pq} claimed as {b} but not in mastersheet")
+            errors.append(f"{pq} is claimed in the report ({b}) but not billed on the mastersheet")
         elif b is None:
-            errors.append(f"{pq} in mastersheet ({a}) but not claimed")
+            errors.append(f"{pq} is billed on the mastersheet ({a}) but not claimed in the report")
         elif not close(a, b):
-            errors.append(f"{pq} quantity {a} vs {b}")
+            errors.append(f"{pq} is {a} on the mastersheet but {b} in the report")
     if errors:
-        return FLAG, "Quantity box vs mastersheet: " + " | ".join(errors)
+        return FLAG, as_lines("Quantities do not match:", errors)
 
     notes = []
     if len(item_jobs) != len(master_jobs):
-        notes.append(f"billed as {len(item_jobs)} line(s) where the mastersheet lists "
-                     f"{len(master_jobs)} - totals agree")
+        notes.append(f"the report splits this into {len(item_jobs)} line(s) where the mastersheet has "
+                     f"{len(master_jobs)}, but the totals agree")
 
     # TR388 sketches give no dimensions per mastersheet job, only area
     # arithmetic, so sketch_jobs is None there and the sums are checked instead.
     if sketch is not None:
         sketch_errors = compare_measurements(master_jobs, sketch)
         if sketch_errors is None:
-            notes.append("sketch measurements could not be aligned, dimensions unverified")
+            notes.append("the sketch measurements could not be paired with the mastersheet jobs, "
+                         "so lengths and widths were not checked")
         elif sketch_errors:
-            return FLAG, "Sketch measurements differ: " + " | ".join(sketch_errors)
+            return FLAG, as_lines("Sketch measurements do not match the mastersheet:", sketch_errors)
 
-    total = sum(master_totals.values())
-    detail = f"Quantity box matches mastersheet ({len(master_totals)} PQ, total {round(total, 2)})"
-    suffix = " [" + "; ".join(notes) + "]" if notes else ""
     if evidence.get("sketch_errors"):
-        return REVIEW, f"{detail}, but the sketch arithmetic is off: " + " | ".join(evidence["sketch_errors"]) + suffix
-    return PASS, detail + suffix
+        return FLAG, with_notes(as_lines("Sketch calculation error (the quantities themselves match the mastersheet):",
+                                         evidence["sketch_errors"]), notes)
+    total = sum(master_totals.values())
+    return PASS, with_notes(f"Quantities match the mastersheet ({len(master_totals)} PQ item(s), "
+                            f"total {round(total, 2)})", notes)
 
 
-def sized(jobs):
-    """The jobs that give a length and a width."""
-    return [j for j in jobs or [] if j.get("length") is not None and j.get("width") is not None]
-
-
-def compare_photo_dims(item, evidence):
+def compare_after_dims(evidence):
     """
-    The distances typed over the tape photos and the box drawn round the
-    repair, against the mastersheet. Returns None when there is nothing to
-    compare, else (agrees, note).
+    The distances typed over the AFTER photos - beside a tape, or along the
+    box drawn round the finished repair - against the QUANTITY the report's
+    first page gives: the 'L x W = Q' sizes on the sketch, and the QTY box.
+    Returns None when the format has no such photos, else (agrees, note),
+    agrees being None when no AFTER photo is marked.
 
-    A box agrees when its two sides are a job's length and width, or when
-    they multiply to a job's quantity. A tape agrees when it is one of those
-    sides. The sides come from the mastersheet, or from the sketch where the
-    mastersheet gives none (RM205, TR388 - including the gross area a
-    deduction is taken from); with neither, a lone tape proves nothing.
-
-    A report often labels the surroundings as well - the whole footpath
-    bay next to the patch - so a stray distance proves nothing while some
-    other photo confirms the job. Only photos that confirm nothing at all
-    count against it.
+    Two distances agree when they are a sketch size's length and width, or
+    multiply to one of its quantities. A lone distance agrees when it is
+    one side of a sketch size.
     """
-    photo_dims = evidence.get("photo_dims")
-    if not photo_dims:
+    if "photo_dims" not in evidence:
         return None
-    jobs = item["jobs"]
-    sizes = sized(jobs) or sized(evidence.get("sketch_jobs")) or evidence.get("sketch_sizes") or []
-    sides = [x for j in sizes for x in (j["length"], j["width"])]
+    after = [p for p in evidence["photo_dims"] if p["label"].endswith("AFTER")]
+    if not after:
+        return None, "AFTER photos: no measurements are marked on them, so they were not compared."
 
-    def confirms(a, b):
-        return any(close(a, j["length"]) and close(b, j["width"]) for j in sizes) or \
-            any(close(a * b, j["qty"], tol=0.006) for j in jobs if j["qty"] is not None)
+    sizes = evidence.get("sketch_sizes") or []
+    claimed = [j["qty"] for j in evidence.get("claimed_jobs") or [] if j.get("qty") is not None]
+    if not sizes and not claimed:
+        return False, ("AFTER photos: they are marked with measurements, but the quantity on the report's "
+                       "first page could not be read. Please compare them by hand.")
+    # What an area can match, and how to name it.
+    areas = [(s["qty"], f"the sketch's {s['length']:g} x {s['width']:g}") for s in sizes] + \
+        [(q, f"QTY {q:g}") for q in claimed] + \
+        ([(sum(claimed), f"the total QTY {sum(claimed):g}")] if len(claimed) > 1 else [])
 
-    boxes, tapes, other = [], [], []
-    for p in photo_dims:
-        vs = p["values"]
-        pair = next(((a, b) for a, b in permutations(vs, 2) if confirms(a, b)), None)
+    def size_of(a, b):
+        return next((s for s in sizes if close(a, s["length"]) and close(b, s["width"])), None)
+
+    agree, disagree = [], []
+    for p in after:
+        vs, where = p["values"], f"the AFTER photo on {p['label'].split()[0]}"
+        shown = f"{' x '.join(f'{v:g}' for v in vs)}m on {where}"
+        pairs = list(permutations(vs, 2))
+        pair = next(((a, b) for a, b in pairs if size_of(a, b)), None)
+        area = None if pair else next(((a, b, name) for a, b in pairs for q, name in areas
+                                       if close(a * b, q, tol=0.006)), None)
+        side = None if pair or area or len(vs) != 1 else \
+            next((s for s in sizes if close(vs[0], s["length"]) or close(vs[0], s["width"])), None)
         if pair:
-            boxes.append(f"{pair[0]:g} x {pair[1]:g} on {p['label']}")
-        elif len(vs) == 1 and any(close(vs[0], s) for s in sides):
-            tapes.append(f"{vs[0]:g}m on {p['label']}")
-        elif len(vs) > 1 or sides:
-            other.append(p)
+            agree.append(f"{pair[0]:g} x {pair[1]:g}m on {where} is the sketch's {pair[0]:g} x {pair[1]:g}")
+        elif area:
+            agree.append(f"{area[0]:g} x {area[1]:g}m on {where} gives {area[0] * area[1]:g} m2, the area of {area[2]}")
+        elif side:
+            agree.append(f"{shown} is one side of the sketch's {side['length']:g} x {side['width']:g}")
+        else:
+            disagree.append(shown)
 
-    if boxes or tapes:
-        return True, "photo measurements agree: " + ", ".join(boxes + tapes)
-    if not other:
-        return None
+    if disagree:
+        listed = " + ".join(f"{s['length']:g} x {s['width']:g}" for s in sizes)
+        quantity = " and ".join(x for x in (listed and f"the sketch's {listed}",
+                                            claimed and f"QTY {' + '.join(f'{q:g}' for q in claimed)}") if x)
+        return False, with_notes(as_lines(f"AFTER photos: their measurements do not match {quantity}:",
+                                          disagree),
+                                 [f"these do match: {'; '.join(agree)}"] if agree else [])
+    return True, f"AFTER photos agree with the report: {'; '.join(agree)}."
 
-    listed = " + ".join(f"{j['length']:g} x {j['width']:g}" for j in sizes) or \
-        " + ".join(f"{j['qty']:g}" for j in jobs)
-    read = "; ".join(f"{' x '.join(f'{v:g}' for v in p['values'])}m on {p['label']}" for p in other)
-    return False, f"photo measurements read {read}, against {listed}"
 
-
-def reinforce_with_photos(status, detail, item, evidence):
+def triple_check(status, detail, evidence):
     """
-    Check 2's sub-check. Photo measurements are typed by the contractor and
-    may label more than the repair, so they support a PASS or turn it into
-    REVIEW; they never FLAG on their own. Without them check 2 stands as it is.
+    Check 2 as a chain of three: the mastersheet against the report's
+    quantities (compare_jobs), then those quantities against what the
+    AFTER photos measure. A disagreement anywhere is a FLAG; photos with
+    nothing marked leave the first two to stand on their own.
     """
-    result = compare_photo_dims(item, evidence)
+    result = compare_after_dims(evidence)
     if result is None or status == NA:
         return status, detail
     agrees, note = result
-    if status == PASS and not agrees:
-        return REVIEW, f"{detail}, but {note}"
-    return status, f"{detail} [{note}]"
+    return (FLAG if agrees is False else status), f"{detail}\n{note}"
 
 
 # ---------- Check 3: AFTER photos ----------
@@ -326,39 +354,53 @@ def photo_dates_match(photos, master_date):
     notes = []
     if late:
         days = max(g for _, _, g in late)
-        notes.append(f"photo(s) on {', '.join(label for label, _, _ in late)} taken "
-                     f"{fmt_date(min(d for _, d, _ in late))}, {days} day after completion")
+        notes.append(f"the photo(s) on {', '.join(label for label, _, _ in late)} were taken "
+                     f"{fmt_date(min(d for _, d, _ in late))}, {days} day after completion, which is allowed")
     if by_board:
-        notes.append(f"completion board on {', '.join(by_board)} matches although the "
-                     f"photo was taken on another day")
+        notes.append(f"the photo on {', '.join(by_board)} was taken on another day, but the "
+                     f"completion board in it shows the right date")
     if skipped:
-        notes.append(f"{len(skipped)} EFMS screenshot(s) ignored ({', '.join(skipped)})")
+        notes.append(f"{len(skipped)} EFMS screenshot(s) were skipped ({', '.join(skipped)})")
     if unreadable:
-        notes.append(f"no readable timestamp on {', '.join(unreadable)}")
-    suffix = " [" + "; ".join(notes) + "]" if notes else ""
+        notes.append(f"the date stamp could not be read on {', '.join(unreadable)}")
 
     if wrong:
-        details = "; ".join(f"{label}=" + "/".join(fmt_date(d) for d in ds) for label, ds in wrong)
-        return FLAG, f"Master completion date {fmt_date(master_date)} != {details}{suffix}"
+        details = [f"{label} is dated " + " / ".join(fmt_date(d) for d in ds) for label, ds in wrong]
+        return FLAG, with_notes(as_lines(f"Wrong date: the mastersheet says the work was completed on "
+                                         f"{fmt_date(master_date)}, but:", details), notes)
 
     if doubtful and not confirmed:
-        details = "; ".join(f"{label}=" + "/".join(fmt_date(d) for d in ds) for label, ds in doubtful)
-        return REVIEW, (f"Watermark read as {details}, probably {fmt_date(master_date)} with its "
-                        f"first digit lost - check the photo{suffix}")
+        details = "; ".join(f"{label} as " + " / ".join(fmt_date(d) for d in ds) for label, ds in doubtful)
+        return FLAG, with_notes(f"Date stamp unclear: read {details}. This is probably "
+                                f"{fmt_date(master_date)} with the first digit misread - please check the photo",
+                                notes)
 
     if not confirmed:
-        return FLAG, f"No AFTER photo timestamp could be read{suffix}"
+        return FLAG, with_notes("Could not read the date stamp on any AFTER photo. "
+                                "Please check the photo dates by hand", notes)
 
-    return PASS, f"{len(confirmed)} of {len(photos)} AFTER photo(s) match {fmt_date(master_date)}{suffix}"
+    return PASS, with_notes(f"{len(confirmed)} of {len(photos)} AFTER photo(s) are dated "
+                            f"{fmt_date(master_date)}, as on the mastersheet", notes)
 
 
 def check_after_dates(photos, master_date):
     if photos is None:
-        return NA, "This format has no labelled AFTER photos"
+        return NA, "This report format has no labelled AFTER photos."
     if master_date is None:
-        return FLAG, "Mastersheet completion date is unreadable"
+        return FLAG, "Could not read the completion date on the mastersheet. Please check it by hand."
     if not photos:
-        return FLAG, "No AFTER photos found"
+        return FLAG, "No AFTER photos were found in the report."
+
+    # No photo was labelled After, so the reader handed over the last photo
+    # instead. A wrong label is still a mistake, so this never passes.
+    stand_in = next((p for p in photos if p.get("stand_in")), None)
+    if stand_in:
+        status, detail = photo_dates_match(photos, master_date)
+        if status == PASS:
+            return FLAG, (f"No photo is labelled After. The last photo (labelled {stand_in['stand_in']}) "
+                          f"shows a date of {fmt_date(master_date)}, matching the completion date, "
+                          f"so it is probably the After photo with the wrong label. Please confirm.")
+        return FLAG, f"No photo is labelled After, so {stand_in['label']} was checked instead. {detail}"
 
     groups = {}
     for photo in photos:
@@ -371,91 +413,111 @@ def check_after_dates(photos, master_date):
     results = {group or "folder root": photo_dates_match(ps, master_date) for group, ps in groups.items()}
     for group, (status, detail) in results.items():
         if status == PASS:
-            return PASS, f"{detail} (in {group})"
-    return FLAG, " | ".join(f"{group}: {detail}" for group, (_, detail) in results.items())
+            return PASS, f"In {group}: {detail}"
+    return FLAG, "\n".join(f"In {group}: {detail}" for group, (_, detail) in results.items())
 
 
 # ---------- Check 4: OIC instruction ----------
 def check_oic(oic):
     if oic is None:
-        return NA, "This format has no OIC instruction record"
+        return NA, "This report format has no OIC instruction page."
     return (PASS if oic["found"] else FLAG), oic["detail"]
 
 
-# ---------- Check 5: prices ----------
+# ---------- Check 5: PQ items and prices ----------
 def money(x):
     return f"${x:,.2f}"
 
 
+def fmt_band(band):
+    above, up_to = band
+    if above is None:
+        return f"areas up to {up_to:g} m2"
+    if up_to is None:
+        return f"areas over {above:g} m2"
+    return f"areas over {above:g} m2 up to {up_to:g} m2"
+
+
 def check_prices(jobs, completed, price_list):
     """
-    Each mastersheet line against the contract's rate schedule: the unit
-    rate billed is the scheduled one, and QTY x rate is the total billed.
+    Each mastersheet line against the contract's rate schedule: it is billed
+    under the right PQ item, at the scheduled unit rate, and QTY x rate is
+    the total billed.
+
+    Items like PQ30.1.1/.2/.3 are one repair priced by the area of the
+    location, so a line's area must fall in its item's range. Each line is
+    one location: a location split across ranges is billed as one line per
+    range, as RM206 NE4-E-43055 does.
 
     A schedule has a period - TR388's is a contract extension - and work
     done outside it was priced under another schedule, so its rates are
-    shown but not judged. Arithmetic that does not add up, or a unit that
-    is not the item's, is wrong whichever schedule applies.
+    shown but not judged. The wrong item for the area, arithmetic that does
+    not add up, or a unit that is not the item's, is wrong whichever
+    schedule applies - an item's area range does not change between them.
     """
     contract = (price_list or {}).get("contract")
     schedules = (price_list or {}).get("schedules") or []
     rejected = (price_list or {}).get("rejected") or []
+    where = (price_list or {}).get("where") or "in the price folder"
     # A contract accumulates schedules, so the one covering this line's
     # completion date is the one it should have been billed against.
     schedule = schedule_for(schedules, completed)
     if schedule is None:
-        detail = f"No rate schedule for {contract or 'this contract'} in the price folder"
+        detail = f"No rate schedule for {contract or 'this contract'} {where}, so PQ items and prices were not checked"
         if rejected:
-            detail += "; unusable: " + "; ".join(f"{name} - {why}" for name, why in rejected)
-        return NA, detail
+            detail += ". Files that could not be used: " + "; ".join(f"{name} ({why})" for name, why in rejected)
+        return NA, detail + "."
     if not jobs:
-        return NA, "No PQ lines to price"
+        return NA, "No billed lines to price."
 
     start, end = schedule["valid_from"], schedule["valid_to"]
     outside = completed is not None and ((start and completed < start) or (end and completed > end))
-    wrong, doubts, unjudged, total = [], [], [], 0.0
+    wrong, unjudged, total = [], [], 0.0
 
     for j in jobs:
         pq, qty, billed, unit = j["pq"], j["qty"], j.get("rate"), j.get("unit")
         entry = schedule["items"].get(pq.upper())
         if entry is None:
-            doubts.append(f"{pq} is not in the {contract} rate schedule")
+            wrong.append(f"{pq} is not an item in the {contract} rate schedule")
             continue
+        band = area_band(entry["description"])
+        if band and qty is not None:
+            above, up_to = band
+            if (above is not None and qty <= above) or (up_to is not None and qty > up_to):
+                wrong.append(f"{pq} is for {fmt_band(band)}, but this line bills {qty:g} m2")
         rate = entry["rate"]
         if billed is None:
-            doubts.append(f"{pq} unit rate unreadable (schedule {money(rate)})")
+            wrong.append(f"could not read the unit rate for {pq} (it should be {money(rate)}) - please check it by hand")
         elif not close(billed, rate, tol=0.005):
-            (unjudged if outside else wrong).append(f"{pq} billed at {money(billed)}, schedule {money(rate)}")
+            (unjudged if outside else wrong).append(
+                f"{pq} is billed at {money(billed)}, but the schedule rate is {money(rate)}")
         if unit and entry["unit"] and not same_unit(unit, entry["unit"]):
-            doubts.append(f"{pq} billed per {unit}, scheduled per {entry['unit']}")
+            wrong.append(f"{pq} is billed per {unit}, but the schedule prices it per {entry['unit']}")
 
         amount = j.get("amount")
         if amount is not None and qty is not None and billed is not None:
             # Totals are printed to the cent, so 1.68 x $36.10 = $60.648 is billed as $60.65.
             if not close(amount, qty * billed, tol=0.011):
-                wrong.append(f"{pq} total {money(amount)}, but {qty:g} x {money(billed)} = {money(qty * billed)}")
+                wrong.append(f"{pq} total is {money(amount)}, but {qty:g} x {money(billed)} "
+                             f"= {money(qty * billed)}")
             total += amount
 
     notes = []
     if outside:
-        held = (f", and none of the {len(schedules)} {contract} schedules in the price folder covers it"
+        held = (f", and none of the {len(schedules)} {contract} schedules {where} covers that date"
                 if len(schedules) > 1 else "")
-        notes.append(f"completed {fmt_date(completed)}, outside the {contract} schedule's period "
-                     f"{fmt_date(start)} to {fmt_date(end)}{held}, so rates are not judged"
-                     + (": " + " | ".join(unjudged) if unjudged else ""))
-
-    def bracket(xs):
-        return " [" + "; ".join(xs) + "]" if xs else ""
+        notes.append(f"the work was completed {fmt_date(completed)}, outside the {contract} schedule's period "
+                     f"({fmt_date(start)} to {fmt_date(end)}){held}, so these rates were not checked")
+        notes.extend(unjudged)
 
     if wrong:
-        return FLAG, " | ".join(wrong) + bracket(doubts + notes)
-    if doubts:
-        return REVIEW, " | ".join(doubts) + bracket(notes)
+        return FLAG, with_notes(as_lines("Price problem:", wrong), notes)
     if unjudged:
-        return NA, notes[0][0].upper() + notes[0][1:]
+        return NA, as_lines(sentence(notes[0]), unjudged)
     if len(schedules) > 1:
         notes.append(f"priced against {schedule['source']}")
-    return PASS, f"{len(jobs)} line(s) at {contract} schedule rates, total {money(total)}{bracket(notes)}"
+    return PASS, with_notes(f"All {len(jobs)} line(s) are billed under the right PQ item at the {contract} schedule rates, "
+                            f"total {money(total)}", notes)
 
 
 # ---------- Full workflow ----------
@@ -479,23 +541,25 @@ def run_checks(items, evidence, evidence_name="incident report", progress=None, 
             progress(done, len(items))
         count = counts.get(key, 0)
         if key in not_submitted:
-            c1, d1 = NA, f"No {evidence_name}s for sector {m['sector']} in this batch"
+            c1, d1 = NA, f"Sector {m['sector']} was not part of this batch."
         elif count == 0:
-            c1, d1 = FLAG, f"Missing {evidence_name}"
+            c1, d1 = FLAG, f"Missing: no {evidence_name} was uploaded for this item."
         elif count > 1:
-            c1, d1 = FLAG, f"Duplicate {evidence_name}s: {count}"
+            c1, d1 = FLAG, f"Duplicate: {count} {evidence_name}s were uploaded for this item; there should be one."
         else:
-            c1, d1 = PASS, f"Exactly one {evidence_name} found"
+            c1, d1 = PASS, f"One {evidence_name} found for this item."
 
         c2 = c3 = c4 = NA if key in not_submitted else "NOT RUN"
-        d2 = d3 = d4 = "Requires exactly one matched report"
+        d2 = d3 = d4 = ("Not checked, because this item needs exactly one "
+                        f"{evidence_name} (see Check 1).")
 
         if count == 1:
             e = by_key[key][0]
             # Matched by key, but the evidence may describe another site.
             if e.get("location_note"):
-                c1, d1 = REVIEW, f"Evidence found, but the site may not match: {e['location_note']}"
-            c2, d2 = reinforce_with_photos(*compare_jobs(m, e), m, e)
+                c1, d1 = FLAG, (f"Location may not match: {e['location_note']}. "
+                                f"Please confirm this {evidence_name} is for the right site.")
+            c2, d2 = triple_check(*compare_jobs(m, e), e)
             c3, d3 = check_after_dates(e["after_photos"], m["date"])
             c4, d4 = check_oic(e["oic"])
 

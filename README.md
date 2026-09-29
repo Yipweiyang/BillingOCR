@@ -17,7 +17,7 @@ python -m venv .venv
 ```
 
 Then upload a mastersheet and its evidence - one incident report PDF per defect, a bundle PDF
-per sector, or a ZIP of the photo folders. The format is recognised from the mastersheet,
+per sector, or a ZIP of the photo folders - plus the contract's price schedule for check 5. The format is recognised from the mastersheet,
 and a batch whose files do not match it is refused with an explanation rather than checked as
 the wrong format.
 
@@ -54,19 +54,26 @@ data/
 | 2 | Do the quantities agree with what was claimed? |
 | 3 | Were the AFTER photos taken when the mastersheet says the work finished? |
 | 4 | Is the officer's instruction in the report? |
-| 5 | Is each line billed at the contract's scheduled unit rate, and does QTY × rate give its total? |
+| 5 | Is each line billed under the right PQ item for its area (≤ 2 m², 2–5 m², > 5 m²), at the contract's scheduled unit rate, and does QTY × rate give its total? |
 
-Check 2 also compares the distances typed over the photos, beside a measuring tape or along the
-box drawn around the repair, with the billed dimensions. This only adds weight: agreement is
-noted, and a disagreement turns a PASS into REVIEW. A report with no such labels is checked as
-before.
+Check 2 is a chain of three: the mastersheet against the report's ITEM/QTY box (and its sketch),
+then the report's QUANTITY against the distances typed over the AFTER photos (beside a measuring
+tape, or along the box drawn around the repair). Two distances agree when they are a sketch line's
+length and width, or when they multiply to one of its quantities; a single distance agrees when it
+is one side of a sketch line. A disagreement anywhere is a FLAG. AFTER photos with no measurements
+marked leave the first comparison to stand on its own, and the detail says so. TR387 has no report
+page, so its site board is compared with the mastersheet instead.
+Only text shown on the page counts: a QUANTITY line hidden under the map (left over from a copied
+report) is ignored, and a QUANTITY box whose text layer cannot be read is OCR'd.
 
-Check 5 needs only the mastersheet, so it runs even where the evidence is missing. The rates
-come from the contract's rate schedule in `price/` (see below).
+Check 5 needs only the mastersheet, so it runs even where the evidence is missing. The
+rates and the area each PQ item is for come from the contract's rate schedule, which
+the user uploads (see below). Each mastersheet line is taken as one location: a location split across
+bands is billed as one line per band.
 
-Results are **PASS**, **FLAG** (the evidence contradicts the mastersheet), **REVIEW** (it could
-not be read well enough to decide — usually hand-writing, so it needs eyes, not suspicion),
-**N/A** (this format has nothing to check here) or **NOT RUN** (check 1 found no single piece
+Results are **PASS**, **FLAG** (someone needs to look — the detail says whether the
+evidence contradicts the mastersheet or could not be read well enough to decide, usually
+hand-writing), **N/A** (this format has nothing to check here) or **NOT RUN** (check 1 found no single piece
 of evidence, so the rest cannot run).
 
 ## Formats
@@ -86,32 +93,42 @@ with an error rather than guessing.
 
 ## Rate schedules
 
-Check 5 reads the contract's Bill of Quantities from a `price/` folder next to `app.py`:
+Check 5 reads the contract's Bill of Quantities, which the user uploads in the app's third box
+alongside the mastersheet. Price files hold contract rates, so like the batches they are never
+committed and the app saves none to disk: whoever runs a check supplies them. Several can be
+uploaded at once - an original and its extensions, or schedules for other contracts, which are
+simply not used. These shapes are read:
 
 ```
-price/
+  RM205 Consol Doc (Vol. 1).pdf           the whole contract document, as a PDF
   RM206_Rate_Sec A & B 1.xls              .xls workbook
-  TR388_CHC_Price_SOT_Extension.pdf       or a PDF with a text layer
+  TR387_ESTIMATION (EL) (r3) 2.xlsb       .xlsb price list
+  TR388_CHC_Price_SOT_Extension.pdf       PDF with a text layer
 ```
 
 Only Section B — *Provisional quantities for ad hoc works* — is read, since that is what the
-mastersheet's PQ items refer to. A schedule is matched to a batch by the contract code in the
+mastersheet's PQ items refer to. An *option bill* repeating Section B at other rates (RM205
+has one) is skipped: mastersheets bill the main one. A schedule is matched to a batch by the contract code in the
 mastersheet (`RM206`). The TR388 mastersheet names no contract, so it is matched by region
 instead: its NW1–NW3 sectors are the schedule's "North West sector".
 
-A contract with no schedule in the folder reports N/A. So far that is RM205 and TR387. A
-schedule that states a period, like the TR388 2026–2028 extension, only judges work completed
-inside it. For earlier work the rates are shown but not judged, and the check reports N/A
-unless the arithmetic or a unit is wrong. `price/` is not committed.
+A batch with no schedule uploaded for its contract reports N/A. A schedule that states a period, like
+the TR388 2026–2028 extension, only judges the rates of work completed inside it. For earlier
+work the rates are shown but not judged, and check 5 reports N/A unless the arithmetic or a
+unit is wrong. The PQ item's area range is judged either way, since it does not change
+between schedules.
 
-**A contract may have several schedules** — an original and its extensions — and the folder can
-hold them all. Each line is priced against the schedule covering its completion date, so one
-batch spanning a renewal is judged correctly throughout, and the result names the schedule it
-used. Drop a new sheet in beside the old one; nothing needs renaming or removing.
+**A contract may have several schedules** — an original and its extensions — and all of them
+can be uploaded together. Each line is priced against the schedule covering its completion
+date, so one batch spanning a renewal is judged correctly throughout, and the result names the
+schedule it used.
 
 A price file that cannot be read, names no contract, or yields no Section B items is **not**
-silently skipped: check 5 names it and says why, so a sheet in an unexpected shape shows up as
+silently skipped: the app names it and says why, so a sheet in an unexpected shape shows up as
 a message rather than as every row quietly reporting N/A.
+
+`check_batch()`, which checks a `data/` folder in code, reads its schedules from a `price/`
+folder next to `app.py` instead. `price/` is not committed either.
 
 ## Code
 
@@ -121,7 +138,7 @@ changes to the checks.
 - `checker/readers.py` — turns a batch into mastersheet items plus evidence, and picks the format
 - `checker/mastersheet.py`, `report.py` — the RM formats; `photo_folder_format.py` — the photo format; `bundled_pdf_format.py` — the bundle format
 - `checker/photos.py` — watermark dates, AFTER photos, board dimensions
-- `checker/prices.py` — reads the rate schedules in `price/` and picks the one a mastersheet is billed against
+- `checker/prices.py` — reads the uploaded rate schedules (or `price/`) and picks the one a mastersheet is billed against
 - `checker/checks.py` — the five checks; knows nothing about page layouts
 - `checker/common.py`, `cache.py`, `parallel.py` — OCR, remembered results, worker pool
 - `app.py` — the interface
@@ -145,7 +162,7 @@ automatically. Deleting it only costs time.
 - Photo batches assume the last photo of the day shows finished work; nothing distinguishes a
   late "during" shot.
 - A board with no dimensions written on it cannot be verified at all.
-- Hand-writing is read imperfectly, so a few items per batch come back as REVIEW.
+- Hand-writing is read imperfectly, so a few items per batch are flagged as unreadable.
 - The photo measurements are the contractor's own labels, read from the PDF text. The numbers on
   the tape itself are not read, and photo folders (TR387) have no labels to compare.
 - There is no automated test suite yet; changes are checked by re-running whole batches and

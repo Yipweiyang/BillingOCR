@@ -168,12 +168,24 @@ def photo_distances(page, pno):
     def drawn_at(point):
         return max((i for r, i in texts if r.contains(point)), default=-1)
 
-    kinds, lines = {}, {}
+    kinds, lines, above = {}, {}, []
     for w in page.get_text("words"):
         c = fitz.Point((w[0] + w[2]) / 2, (w[1] + w[3]) / 2)
-        if w[4].strip().upper() in PHOTO_LABELS and (f := frame_at(c)):
-            kinds[f[1]] = w[4].strip().upper()
+        if w[4].strip().upper() in PHOTO_LABELS:
+            if f := frame_at(c):
+                kinds[f[1]] = w[4].strip().upper()
+            else:
+                above.append((c, w[3], w[4].strip().upper()))
         lines.setdefault((w[5], w[6]), []).append(w)
+
+    # The RM templates label a photo inside its top corner; TR388 puts the
+    # label just above it.
+    for r, i in frames:
+        if i not in kinds:
+            near = [(r.y0 - bottom, kind) for c, bottom, kind in above
+                    if r.x0 <= c.x <= r.x1 and -5 <= r.y0 - bottom <= 30]
+            if near:
+                kinds[i] = min(near)[1]
 
     values = {}
     for ws in lines.values():

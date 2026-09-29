@@ -13,7 +13,7 @@ import pdfplumber
 from PIL import Image
 
 from .common import PQ_RE, num, ocr_image, parse_date
-from .mastersheet import header_columns
+from .mastersheet import header_columns, header_match
 from .parallel import pmap
 from .photos import board_dims, dims_match, parse_timestamp
 
@@ -26,6 +26,12 @@ TR387_COLUMNS = {
     "qty": ("QTY",),
     "pq": ("PQ/FSR/SOR ITEMS", "PQ / FSR / SOR ITEMS"),
     "date": ("COMPLETED DATE",),
+}
+# What each line is billed at, for the price check; optional like the RM ones.
+TR387_PRICE_COLUMNS = {
+    "unit": ("UNIT OF MEASURE",),
+    "rate": ("UNIT RATE",),
+    "amount": ("TOTAL COST ($)", "TOTAL COST"),
 }
 FOLDER_RE = re.compile(r"^(\d+)(?:\s*-\s*(\d+))?\.")
 # "0.45x2": tiles, a size and how many - the board shows ".250x.450=2nos".
@@ -74,7 +80,7 @@ def is_tr387_master(pdf_bytes):
 
 
 def parse_tr387_master(pdf_bytes):
-    """{S/N: {"sn", "ref", "date", "location", "landmark", "jobs": [{"pq", "qty"}], "areas"}}"""
+    """{S/N: {"sn", "ref", "date", "location", "landmark", "jobs": [{"pq", "qty", "unit", "rate", "amount"}], "areas"}}"""
     items = {}
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
@@ -83,11 +89,12 @@ def parse_tr387_master(pdf_bytes):
                 for row in table:
                     found = header_columns(row, TR387_COLUMNS)
                     if found:
-                        cols = found
+                        cols = {**found, **header_match(row, TR387_PRICE_COLUMNS)}
                         continue
                     if cols is None:
                         continue
                     row = list(row) + [None] * (max(cols.values()) + 1 - len(row))
+                    price = {f: row[cols[f]] if f in cols else None for f in TR387_PRICE_COLUMNS}
                     sn = (row[cols["sn"]] or "").strip()
                     pqm = PQ_RE.search(row[cols["pq"]] or "")
                     item_code = pqm.group(0).upper() if pqm else (row[cols["pq"]] or "").strip().upper()
@@ -99,7 +106,9 @@ def parse_tr387_master(pdf_bytes):
                         "date": parse_date(row[cols["date"]]),
                         "location": " ".join((row[cols["location"]] or "").split()),
                         "landmark": " ".join((row[cols["landmark"]] or "").split()),
-                        "jobs": [{"pq": item_code, "length": None, "width": None, "qty": num(row[cols["qty"]])}],
+                        "jobs": [{"pq": item_code, "length": None, "width": None, "qty": num(row[cols["qty"]]),
+                                  "unit": " ".join((price["unit"] or "").split()) or None,
+                                  "rate": num(price["rate"]), "amount": num(price["amount"])}],
                         "areas": row_areas(row[cols["length"]], row[cols["width"]]),
                     }
     return items
@@ -130,7 +139,7 @@ def location_note(item, folder_name):
     same_place = words(master) <= words(folder) or words(folder) <= words(master)
     if same_place and re.findall(r"\d+", master) == re.findall(r"\d+", folder):
         return None
-    return f"folder '{folder_name}' vs mastersheet '{item['location']} {item['landmark']}'"
+    return f"the folder is named '{folder_name}' but the mastersheet says '{item['location']} {item['landmark']}'"
 
 
 def folder_sns(name):
