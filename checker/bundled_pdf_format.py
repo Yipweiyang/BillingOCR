@@ -24,7 +24,7 @@ from PIL import Image
 from .common import close, num, ocr_image, parse_date, sketch_sizes
 from .mastersheet import header_columns, header_match
 from .parallel import pmap
-from .photos import native_image, parse_timestamp, photo_distances
+from .photos import native_image, parse_timestamp, photo_distances, watermark_crop
 from .photo_folder_format import normalise_place
 
 TR388_COLUMNS = {
@@ -307,13 +307,6 @@ def read_incident(doc, source, oic, sketch, photos):
                 "stand_in": stand_in,
             })
     return record
-
-
-def watermark_crop(image, scale=2):
-    """The bottom-right corner where the camera stamps its date, enlarged."""
-    w, h = image.size
-    corner = image.crop((int(w * 0.4), int(h * 0.75), w, h))
-    return corner.resize((corner.width * scale, corner.height * scale), Image.LANCZOS)
 
 
 def _read_after_photo(photo):

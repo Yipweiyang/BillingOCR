@@ -100,7 +100,9 @@ def close(a, b, tol=NUM_TOL):
 
 
 # A size in a sketch: "1.4m x 0.2m", "0.3m x 0.3m 5 Nos", with or without "= 0.28m2" after it.
+# A triangle is written as half a rectangle: "1/2 x 2.3m x 1.0m".
 SIZE_RE = re.compile(
+    r"(?P<half>1\s*/\s*2\s*[xX×]\s*)?"
     r"(\d+(?:\.\d+)?)\s*m?\s*[xX×]\s*(\d+(?:\.\d+)?)\s*m?(?:\s*[xX×]?\s*(\d+)\s*Nos?\b\.?)?", re.I)
 
 
@@ -137,14 +139,40 @@ def sketch_text(page):
 
 
 def sketch_sizes(page):
-    """Every 'L x W' on a sketch page, deductions included, as [{"length", "width", "qty"}]."""
-    out = []
-    for m in SIZE_RE.finditer(sketch_text(page)):
-        length, width = float(m.group(1)), float(m.group(2))
-        size = {"length": length, "width": width, "qty": length * width * int(m.group(3) or 1)}
+    """
+    Every 'L x W' on a sketch page as [{"length", "width", "count", "half", "qty", "less"}].
+    less marks a deduction - an area inside the repair that was not worked
+    on, such as a grating or tactile tiles - written "Less grating area
+    0.85m x 1m" or "2.2m x 2.1m - 1m x 0.85m". half marks a triangle.
+    """
+    text = sketch_text(page)
+    out, end = [], 0
+    for m in SIZE_RE.finditer(text):
+        before = text[end:m.start()].strip()
+        end = m.end()
+        length, width, count, half = float(m.group(2)), float(m.group(3)), int(m.group(4) or 1), bool(m.group("half"))
+        size = {"length": length, "width": width, "count": count, "half": half,
+                "qty": length * width * count * (0.5 if half else 1),
+                "less": bool(re.search(r"\bless\b", before, re.I)) or before in ("-", "–", "—")}
         if size not in out:
             out.append(size)
     return out
+
+
+def sizes_sum(sizes):
+    """Sketch sizes as the sum they stand for: "7.3 x 1.5 - 0.3 x 0.3 x 8 nos"."""
+    out = ""
+    for s in sizes:
+        sign = " - " if s.get("less") else " + "
+        size = f"{'1/2 x ' if s.get('half') else ''}{s['length']:g} x {s['width']:g}" \
+            f"{' x %d nos' % s['count'] if s.get('count', 1) > 1 else ''}"
+        out += (sign if out else sign.strip(" +")) + size
+    return out
+
+
+def sizes_net(sizes):
+    """What the sketch's sizes come to, deductions taken off."""
+    return sum(-s["qty"] if s.get("less") else s["qty"] for s in sizes)
 
 
 def area_total(areas):

@@ -20,6 +20,7 @@ never depend on a contract's document layout:
                   ends in the photo's BEFORE/DURING/AFTER tag where it has one
     after_photos  [{"label", "image" or "path", "group", "text"}] - text is the
                   OCR already done by the reader, group splits a shared folder
+    completed     the Date Completed typed on the report's first page (RM only)
     oic           {"found", "detail"}
 
 A field the format cannot provide at all is None, and the check that

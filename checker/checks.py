@@ -6,9 +6,9 @@ import os
 from collections import Counter
 from itertools import permutations
 
-from .common import area_total, close, fmt_date, ocr_image
+from .common import area_total, close, fmt_date, ocr_image, sizes_net, sizes_sum
 from .photos import (board_area_rescan, board_confirms, board_confirms_area, dims_match,
-                     is_app_screenshot, load_photo, parse_timestamp)
+                     is_app_screenshot, load_photo, parse_timestamp, stamp_confirms)
 from .prices import area_band, price_list_for, same_unit, schedule_for
 from .readers import read_batch
 
@@ -88,7 +88,8 @@ def compare_measurements(master_jobs, sketch_jobs):
     for i in range(n):
         a, b = master_jobs[i], sketch_jobs[perm[i]]
         e = [f"{f} {a[f]} on the mastersheet but {b[f]} on the sketch"
-             for f in ("length", "width", "qty") if not close(a[f], b[f])]
+             # A mastersheet with no length and width columns gives nothing to compare.
+             for f in ("length", "width", "qty") if a[f] is not None and not close(a[f], b[f])]
         if e:
             errors.append(f"job {i+1} has " + ", ".join(e))
     return errors
@@ -211,9 +212,21 @@ def compare_jobs(item, evidence):
 
     # TR388 sketches give no dimensions per mastersheet job, only area
     # arithmetic, so sketch_jobs is None there and the sums are checked instead.
+    total = sum(master_totals.values())
     if sketch is not None:
         sketch_errors = compare_measurements(master_jobs, sketch)
-        if sketch_errors is None:
+        # The sketch's lines are gross areas. What is billed is what is left
+        # once the areas marked "Less" - gratings, tactile tiles, lamp poles -
+        # are taken off, and several areas may be billed as one line. So where
+        # the lines do not pair off with the mastersheet, or do but differ, the
+        # sketch still agrees when its areas come to the billed total.
+        sizes = evidence.get("sketch_sizes") or []
+        deducted = any(s.get("less") for s in sizes)
+        adds_up = bool(sizes) and close(sizes_net(sizes), total, tol=0.006)
+        if adds_up and (sketch_errors is None or (sketch_errors and deducted)):
+            notes.append(f"the sketch's areas come to the same {round(total, 2):g}"
+                         f"{' once the deductions are taken off' if deducted else ''}: {sizes_sum(sizes)}")
+        elif sketch_errors is None:
             notes.append("the sketch measurements could not be paired with the mastersheet jobs, "
                          "so lengths and widths were not checked")
         elif sketch_errors:
@@ -222,7 +235,6 @@ def compare_jobs(item, evidence):
     if evidence.get("sketch_errors"):
         return FLAG, with_notes(as_lines("Sketch calculation error (the quantities themselves match the mastersheet):",
                                          evidence["sketch_errors"]), notes)
-    total = sum(master_totals.values())
     return PASS, with_notes(f"Quantities match the mastersheet ({len(master_totals)} PQ item(s), "
                             f"total {round(total, 2)})", notes)
 
@@ -255,30 +267,59 @@ def compare_after_dims(evidence):
         [(q, f"QTY {q:g}") for q in claimed] + \
         ([(sum(claimed), f"the total QTY {sum(claimed):g}")] if len(claimed) > 1 else [])
 
-    def size_of(a, b):
-        return next((s for s in sizes if close(a, s["length"]) and close(b, s["width"])), None)
+    def sides(vs):
+        """
+        The sketch size each distance belongs to, as [(size, side)] - side
+        None where the photo shows both its length and width - or None
+        unless every distance is accounted for. A photo of several areas
+        need not show both sides of each, so two distances are not assumed
+        to be one length and width; but no lone side is used twice, so
+        2 and 2 do not pass against 2 x 1.
+        """
+        left, found = list(vs), []
+
+        def take(x):
+            v = next((v for v in left if close(v, x)), None)
+            if v is not None:
+                left.remove(v)
+            return v
+
+        # Whole sizes first, so a length and width shown together stay together.
+        for s in sizes:
+            while any(close(v, s["length"]) for v in left):
+                a = take(s["length"])
+                b = take(s["width"])
+                if b is None:
+                    left.append(a)
+                    break
+                found.append((s, None))
+        pool = [(s[f], s) for s in sizes for f in ("length", "width")]
+        for v in left:
+            hit = next((n for n, (x, _) in enumerate(pool) if close(v, x)), None)
+            if hit is None:
+                return None
+            found.append((pool.pop(hit)[1], v))
+        return found
 
     agree, disagree = [], []
     for p in after:
-        vs, where = p["values"], f"the AFTER photo on {p['label'].split()[0]}"
+        vs, where = p["values"], f"the AFTER photo on page {p['label'].split()[0][1:]}"
         shown = f"{' x '.join(f'{v:g}' for v in vs)}m on {where}"
-        pairs = list(permutations(vs, 2))
-        pair = next(((a, b) for a, b in pairs if size_of(a, b)), None)
-        area = None if pair else next(((a, b, name) for a, b in pairs for q, name in areas
-                                       if close(a * b, q, tol=0.006)), None)
-        side = None if pair or area or len(vs) != 1 else \
-            next((s for s in sizes if close(vs[0], s["length"]) or close(vs[0], s["width"])), None)
-        if pair:
-            agree.append(f"{pair[0]:g} x {pair[1]:g}m on {where} is the sketch's {pair[0]:g} x {pair[1]:g}")
+        matched = sides(vs)
+        area = None if matched else next(((a, b, name) for a, b in permutations(vs, 2) for q, name in areas
+                                          if close(a * b, q, tol=0.006)), None)
+        if matched:
+            for s, side in matched:
+                size = f"{s['length']:g} x {s['width']:g}"
+                agree.append(f"{size}m on {where} is the sketch's {size}" if side is None
+                             else f"{side:g}m on {where} is one side of the sketch's {size}")
         elif area:
             agree.append(f"{area[0]:g} x {area[1]:g}m on {where} gives {area[0] * area[1]:g} m2, the area of {area[2]}")
-        elif side:
-            agree.append(f"{shown} is one side of the sketch's {side['length']:g} x {side['width']:g}")
         else:
             disagree.append(shown)
 
     if disagree:
-        listed = " + ".join(f"{s['length']:g} x {s['width']:g}" for s in sizes)
+        listed = sizes_sum(sizes)
         quantity = " and ".join(x for x in (listed and f"the sketch's {listed}",
                                             claimed and f"QTY {' + '.join(f'{q:g}' for q in claimed)}") if x)
         return False, with_notes(as_lines(f"AFTER photos: their measurements do not match {quantity}:",
@@ -317,8 +358,18 @@ def lost_tens_digit(read, master_date):
         master_date.day >= 10 and read.day == master_date.day % 10
 
 
+def photo_name(label):
+    """An RM report's photos are known by their page; other formats name them outright."""
+    return f"the AFTER photo on {label}" if label.startswith("page ") else label
+
+
+def counted(lines):
+    """Lines in first-seen order, a repeated one said once with how many photos it covers."""
+    return [line + (f" ({n} photos)" if n > 1 else "") for line, n in Counter(lines).items()]
+
+
 def photo_dates_match(photos, master_date):
-    confirmed, wrong, unreadable, skipped, by_board, late, doubtful = [], [], [], [], [], [], []
+    confirmed, wrong, unreadable, skipped, by_board, late, doubtful, reread = [], [], [], [], [], [], [], []
 
     for photo in photos:
         label = photo["label"]
@@ -339,6 +390,9 @@ def photo_dates_match(photos, master_date):
             if 0 <= gap <= AFTER_PHOTO_GRACE_DAYS:
                 confirmed.append(label)
                 late.append((label, min(seen), gap))
+            elif stamp_confirms(load_photo(photo), master_date, seen):
+                confirmed.append(label)
+                reread.append((label, seen))
             elif board_confirms(load_photo(photo), master_date):
                 confirmed.append(label)
                 by_board.append(label)
@@ -354,23 +408,28 @@ def photo_dates_match(photos, master_date):
     notes = []
     if late:
         days = max(g for _, _, g in late)
-        notes.append(f"the photo(s) on {', '.join(label for label, _, _ in late)} were taken "
+        notes.append(f"the photo(s) on {', '.join(dict.fromkeys(label for label, _, _ in late))} were taken "
                      f"{fmt_date(min(d for _, d, _ in late))}, {days} day after completion, which is allowed")
     if by_board:
-        notes.append(f"the photo on {', '.join(by_board)} was taken on another day, but the "
+        notes.append(f"the photo on {', '.join(dict.fromkeys(by_board))} was taken on another day, but the "
                      f"completion board in it shows the right date")
+    for label, ds in dict.fromkeys((label, tuple(ds)) for label, ds in reread):
+        notes.append(f"the date stamp on {photo_name(label)} is hard to read: it was first read as "
+                     f"{' / '.join(fmt_date(d) for d in ds)}, and as {fmt_date(master_date)} when enlarged")
     if skipped:
         notes.append(f"{len(skipped)} EFMS screenshot(s) were skipped ({', '.join(skipped)})")
     if unreadable:
-        notes.append(f"the date stamp could not be read on {', '.join(unreadable)}")
+        notes.append(f"the date stamp could not be read on {', '.join(dict.fromkeys(unreadable))}")
 
     if wrong:
-        details = [f"{label} is dated " + " / ".join(fmt_date(d) for d in ds) for label, ds in wrong]
+        details = counted(f"{photo_name(label)} is dated " + " / ".join(fmt_date(d) for d in ds)
+                          for label, ds in wrong)
         return FLAG, with_notes(as_lines(f"Wrong date: the mastersheet says the work was completed on "
                                          f"{fmt_date(master_date)}, but:", details), notes)
 
     if doubtful and not confirmed:
-        details = "; ".join(f"{label} as " + " / ".join(fmt_date(d) for d in ds) for label, ds in doubtful)
+        details = "; ".join(f"{photo_name(label)} as " + " / ".join(fmt_date(d) for d in ds)
+                            for label, ds in doubtful)
         return FLAG, with_notes(f"Date stamp unclear: read {details}. This is probably "
                                 f"{fmt_date(master_date)} with the first digit misread - please check the photo",
                                 notes)
@@ -383,7 +442,21 @@ def photo_dates_match(photos, master_date):
                             f"{fmt_date(master_date)}, as on the mastersheet", notes)
 
 
-def check_after_dates(photos, master_date):
+def check_after_dates(photos, master_date, report_date=None):
+    """
+    The AFTER photos against the mastersheet's completion date, and the
+    Date Completed the report states for itself where it has one.
+    """
+    status, detail = after_photo_dates(photos, master_date)
+    if status == NA or master_date is None or report_date is None:
+        return status, detail
+    if report_date != master_date:
+        return FLAG, (f"Wrong date: the report's first page gives Date Completed as {fmt_date(report_date)}, "
+                      f"but the mastersheet says {fmt_date(master_date)}.\n{detail}")
+    return status, f"{detail}\nNote: The report's first page also gives Date Completed as {fmt_date(report_date)}."
+
+
+def after_photo_dates(photos, master_date):
     if photos is None:
         return NA, "This report format has no labelled AFTER photos."
     if master_date is None:
@@ -560,7 +633,7 @@ def run_checks(items, evidence, evidence_name="incident report", progress=None, 
                 c1, d1 = FLAG, (f"Location may not match: {e['location_note']}. "
                                 f"Please confirm this {evidence_name} is for the right site.")
             c2, d2 = triple_check(*compare_jobs(m, e), e)
-            c3, d3 = check_after_dates(e["after_photos"], m["date"])
+            c3, d3 = check_after_dates(e["after_photos"], m["date"], e.get("completed"))
             c4, d4 = check_oic(e["oic"])
 
         # The mastersheet alone is priced, so this runs whatever the evidence.

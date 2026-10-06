@@ -5,6 +5,7 @@ import re
 from datetime import date
 
 import fitz
+import numpy as np
 from PIL import Image
 
 from .common import close, ocr_image
@@ -129,16 +130,42 @@ def after_images(page):
         for rect in page.get_image_rects(xref):
             images.append((xref, rect))
 
-    out, seen = [], set()
+    # One picture placed twice is one photo, shown in two frames.
+    out = {}
     for w in labels:
         c = fitz.Point((w[0] + w[2]) / 2, (w[1] + w[3]) / 2)
         matches = [(xref, r) for xref, r in images if r.contains(c)]
         if matches:
             xref, r = min(matches, key=lambda x: x[1].get_area())
-            if xref not in seen:
-                seen.add(xref)
-                out.append(xref)
-    return out
+            if r not in out.setdefault(xref, []):
+                out[xref].append(r)
+    return list(out.items())
+
+
+def typed_over(page, rects):
+    """
+    The text typed over a photo, one line per line of text. Some reports
+    type the camera's timestamp onto the picture instead of leaving it in
+    the image, so OCR of the image alone finds no date.
+
+    Only text drawn after the photo counts, as in photo_distances: a
+    template keeps the stamps of the report it was copied from, in frames
+    that now hold no photo or underneath the new one.
+    """
+    log = page.get_bboxlog()
+    frames = [(fitz.Rect(r), i) for i, (kind, r) in enumerate(log) if kind == "fill-image"]
+    texts = [(fitz.Rect(r), i) for i, (kind, r) in enumerate(log) if kind == "fill-text"]
+
+    lines = {}
+    for w in page.get_text("words"):
+        c = fitz.Point((w[0] + w[2]) / 2, (w[1] + w[3]) / 2)
+        if not any(r.contains(c) for r in rects):
+            continue
+        photo = max((i for r, i in frames if r.contains(c)), default=None)
+        drawn = max((i for r, i in texts if r.contains(c)), default=-1)
+        if photo is not None and drawn > photo:
+            lines.setdefault((w[5], w[6]), []).append(w[4])
+    return "\n".join(" ".join(ws) for ws in lines.values())
 
 
 # A distance typed over a photo by the contractor, e.g. "1.4m" beside a
@@ -207,6 +234,13 @@ def native_image(doc, xref):
     return Image.open(io.BytesIO(info["image"])).convert("RGB")
 
 
+def watermark_crop(image, scale=2):
+    """The bottom-right corner where the camera stamps its date, enlarged."""
+    w, h = image.size
+    corner = image.crop((int(w * 0.4), int(h * 0.75), w, h))
+    return corner.resize((corner.width * scale, corner.height * scale), Image.LANCZOS)
+
+
 def load_photo(photo):
     """
     The image of a photo record. Folder batches keep only the path, so a
@@ -231,6 +265,59 @@ def board_confirms(image, master_date):
         for d, source, _ in parse_timestamp(ocr_image(bigger)):
             if source == "placard" and d == master_date:
                 return True
+    return False
+
+
+# A stamp whose month OCR lost: the day, the year and the time, "1 2025 17:09:24".
+STAMP_DAY_RE = re.compile(r"(?<![\d:])(\d{1,2})\s*[.,]?\s*(20\d{2})\s*[.,]?\s*\d{1,2}\s*:\s*\d{2}")
+STAMP_SCALES = (2, 3)
+# The camera stamps its date in white. A pixel this bright and this close
+# to grey is taken to be stamp; anything else is background.
+STAMP_WHITE, STAMP_TINT = 210, 40
+
+
+def stamp_only(image):
+    """
+    The picture with everything but its white lettering blanked out, as
+    black on white. A stamp lying over tactile paving, foliage or sky is
+    lost in the pattern behind it; without the pattern it reads cleanly.
+    """
+    pixels = np.asarray(image.convert("RGB")).astype(int)
+    darkest, lightest = pixels.min(axis=2), pixels.max(axis=2)
+    stamp = (darkest >= STAMP_WHITE) & (lightest - darkest <= STAMP_TINT)
+    return Image.fromarray(np.where(stamp, 0, 255).astype("uint8")).convert("RGB")
+
+
+def stamp_strips(image, scales=STAMP_SCALES):
+    """The top and bottom of a photo, where a stamp sits, enlarged - each as it is and as stamp_only."""
+    w, h = image.size
+    for box in ((0, h - h // 4, w, h), (0, 0, w, h // 4)):
+        strip = image.crop(box)
+        for scale in scales:
+            bigger = strip.resize((strip.width * scale, strip.height * scale), Image.LANCZOS)
+            yield stamp_only(bigger)
+            yield bigger
+
+
+def stamp_confirms(image, master_date, seen):
+    """
+    Re-read the camera's date stamp, enlarged, looking for the mastersheet
+    date. A stamp over trees or sky reads differently from one scale to the
+    next - "Sep 1, 2025" comes back as "Sep 4 2025" at one and "1 2025" at
+    another - so a date seen in any read counts. Like the board, this can
+    clear a doubt but never raise one.
+
+    seen is what the first read gave. Where it already has the right month
+    and year, a re-read showing the right day before that year is enough.
+    """
+    same_month = any((d.year, d.month) == (master_date.year, master_date.month) for d in seen)
+    for strip in stamp_strips(image):
+        text = ocr_image(strip)
+        if any(d == master_date for d, source, _ in parse_timestamp(text) if source == "watermark"):
+            return True
+        if same_month and any((int(m.group(1)), int(m.group(2))) == (master_date.day, master_date.year)
+                              for m in STAMP_DAY_RE.finditer(text)):
+            return True
     return False
 
 

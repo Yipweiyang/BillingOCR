@@ -4,8 +4,10 @@ from itertools import combinations
 
 import fitz
 
-from .common import PQ_RE, close, norm_ref, ocr_image, page_text_with_ocr, ref_number, sketch_sizes, sketch_text
-from .photos import after_images, native_image, photo_distances
+from .common import (PQ_RE, close, norm_ref, ocr_image, page_text_with_ocr, parse_date, ref_number,
+                     sketch_sizes, sketch_text)
+from .photos import (after_images, native_image, parse_timestamp, photo_distances, stamp_only, stamp_strips,
+                     typed_over, watermark_crop)
 
 MEAS_RE = re.compile(
     r"(?P<L>\d+(?:\.\d+)?)\s*m?\s*[xX×]\s*"
@@ -214,11 +216,38 @@ def after_photos(doc):
     """Every image labelled AFTER, in page order."""
     photos = []
     for pno, page in enumerate(doc):
-        for xref in after_images(page):
+        for xref, rects in after_images(page):
             image = native_image(doc, xref)
-            # OCR'd here, while this report has a worker process to itself.
-            photos.append({"label": f"p{pno + 1}", "image": image, "text": ocr_image(image)})
+            # The timestamp is either typed over the photo or burned into
+            # it. OCR'd here, while this report has a worker process to itself.
+            text = typed_over(page, rects) + "\n" + ocr_image(image)
+            # Harder reads, each tried only while the date is still missing.
+            for harder in (watermark_crop(image), stamp_only(watermark_crop(image)), *stamp_strips(image, (2,))):
+                if any(source == "watermark" for _, source, _ in parse_timestamp(text)):
+                    break
+                text += "\n" + ocr_image(harder)
+            photos.append({"label": f"page {pno + 1}", "image": image, "text": text})
     return photos
+
+
+REPORT_DATE_RE = re.compile(r"\d{1,2}[-/][A-Za-z]{3,9}[-/]\d{2,4}|\d{1,2}/\d{1,2}/\d{2,4}")
+
+
+def date_completed(page):
+    """
+    The "Date Completed" the contractor typed on the sketch page, or None.
+    The value sits to the right of its label; where a filled template
+    still carries the old one underneath, the last drawn is the one shown.
+    """
+    words = page.get_text("words")
+    for i, w in enumerate(words):
+        if w[4].strip().lower().startswith("completed") and i and words[i - 1][4].strip().lower() == "date":
+            yc = (w[1] + w[3]) / 2
+            found = [x[4] for x in words
+                     if x[0] > w[2] and abs((x[1] + x[3]) / 2 - yc) <= 6 and REPORT_DATE_RE.fullmatch(x[4].strip())]
+            if found:
+                return parse_date(found[-1])
+    return None
 
 
 def looks_like_oic_instruction(text):
@@ -246,8 +275,15 @@ PHOTO_LABELS = {"BEFORE", "DURING", "AFTER"}
 
 
 def photo_page(page):
-    """A page of the photo template, which always labels its pictures."""
-    return bool({w[4].strip().upper() for w in page.get_text("words")} & PHOTO_LABELS)
+    """
+    A page of the photo template, which always labels its pictures. The
+    label stands alone: an OIC's email saying "feedback from resident
+    during market walk" is not a photo page for having the word in it.
+    """
+    lines = {}
+    for w in page.get_text("words"):
+        lines.setdefault((w[5], w[6]), []).append(w[4].strip().upper())
+    return any(len(ws) == 1 and ws[0] in PHOTO_LABELS for ws in lines.values())
 
 
 def oic_record(doc, own_ref=None):
@@ -294,6 +330,7 @@ def parse_report(pdf_bytes, filename, expected_refs=None):
             "sketch_jobs": attach_pq(ms, pcs),
             "sketch_sizes": sketch_sizes(doc[0]),
             "after_photos": after_photos(doc),
+            "completed": date_completed(doc[0]),
             "photo_dims": [d for pno in range(1, len(doc)) for d in photo_distances(doc[pno], pno)],
             "oic": oic_record(doc, ref),
         }

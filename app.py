@@ -1,4 +1,7 @@
 """Streamlit UI. Run with: streamlit run app.py"""
+from io import BytesIO
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
@@ -11,6 +14,7 @@ STATUS_STYLE = {
     "N/A": "color: #6b6b6b",
     "NOT RUN": "color: #6b6b6b; font-style: italic",
 }
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 DETAIL_STYLE = {
     "FLAG": "background-color: #fdecea; color: #a4192c",
 }
@@ -27,6 +31,13 @@ def style_results(df):
         if detail in df.columns:
             styles[detail] = df[col].map(DETAIL_STYLE).fillna("")
     return df.style.apply(lambda _: styles, axis=None)
+
+
+def styled_excel(df):
+    """The table as an Excel file, FLAG cells red as on screen - a CSV cannot carry colour."""
+    buffer = BytesIO()
+    style_results(df).to_excel(buffer, index=False, engine="openpyxl")
+    return buffer.getvalue()
 
 
 def joined(values):
@@ -64,9 +75,10 @@ price_files = st.file_uploader(
          "Add every schedule the contract has had - an original and its extensions - and each line is "
          "priced against the one covering its completion date. Without it, check 5 is not run.")
 ready = bool(master_file and report_files)
-csv_name = "check_results.csv"
 
 if st.button("Run checks", type="primary", disabled=not ready):
+    # Drop the last run first, so a failed run does not leave stale results on screen.
+    st.session_state.pop("checked", None)
     bar = st.progress(0.0, text="Starting...")
 
     def show(phase, done, total):
@@ -93,6 +105,11 @@ if st.button("Run checks", type="primary", disabled=not ready):
         st.exception(e)
         st.stop()
     bar.empty()
+    # Any click, a download included, reruns this script; keep the run so its results stay up.
+    st.session_state["checked"] = (result, price_list, Path(master_file.name).stem)
+
+if "checked" in st.session_state:
+    result, price_list, master_name = st.session_state["checked"]
 
     a, b, c, d = st.columns(4)
     a.metric("Master records", result["master_count"])
@@ -134,8 +151,15 @@ if st.button("Run checks", type="primary", disabled=not ready):
         st.dataframe(style_results(issues), width="stretch", hide_index=True)
 
     st.download_button(
-        "Download results CSV",
-        df.to_csv(index=False).encode("utf-8-sig"),
-        csv_name,
-        "text/csv",
+        "Download results (Excel)",
+        styled_excel(df),
+        f"{master_name}_results.xlsx",
+        XLSX_MIME,
+    )
+    st.download_button(
+        "Download issues (Excel)",
+        styled_excel(issues),
+        f"{master_name}_issues.xlsx",
+        XLSX_MIME,
+        disabled=issues.empty,
     )

@@ -60,11 +60,22 @@ Check 2 is a chain of three: the mastersheet against the report's ITEM/QTY box (
 then the report's QUANTITY against the distances typed over the AFTER photos (beside a measuring
 tape, or along the box drawn around the repair). Two distances agree when they are a sketch line's
 length and width, or when they multiply to one of its quantities; a single distance agrees when it
-is one side of a sketch line. A disagreement anywhere is a FLAG. AFTER photos with no measurements
+is one side of a sketch line. A photo of several areas need not show both sides of each, so every
+distance only has to be a side of some sketch line, no lone side being used twice. An area the sketch
+marks "Less" (a grating inside the repair, say) is a deduction: it is taken off when the sketch's
+areas are added up against the billed quantity. A disagreement anywhere is a FLAG. AFTER photos with no measurements
 marked leave the first comparison to stand on its own, and the detail says so. TR387 has no report
 page, so its site board is compared with the mastersheet instead.
 Only text shown on the page counts: a QUANTITY line hidden under the map (left over from a copied
 report) is ignored, and a QUANTITY box whose text layer cannot be read is OCR'd.
+
+Check 3 reads each AFTER photo's date wherever the report shows it: burned into the picture by the
+camera, or typed over it as text. A burned-in stamp that reads as another date is read again
+enlarged before it is called wrong, since one over trees or sky reads differently from one scale to
+the next; a re-read giving the mastersheet date passes, with a note saying the stamp is hard to read.
+An RM report's own "Date Completed" on its first page is compared
+with the mastersheet too, and a disagreement is a FLAG; it never stands in for a photo date that
+could not be read.
 
 Check 5 needs only the mastersheet, so it runs even where the evidence is missing. The
 rates and the area each PQ item is for come from the contract's rate schedule, which

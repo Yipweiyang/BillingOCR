@@ -49,6 +49,25 @@ PDF_LINE_RE = re.compile(
     r"^(?P<code>\d+(?:\.\d+)+|[a-z][.)]?)\s+(?P<desc>.+?)\s+(?P<unit>\S+)\s+"
     r"(?P<qty>\d[\d,]*(?:\.\d+)?)\s+(?P<rate>\d[\d,]*\.\d{2})\s+[\d ,]*\.\d{2}$")
 NUMBERED_RE = re.compile(r"^(\d+(?:\.\d+)+)\s")
+# The same line with the quantity or the rate split too - "c) Dash Line Marking
+# m 7 ,000.00 2.20 15,400.00", "... m 1 10,000.00 1 .10 121,000.00". The
+# figures are taken as one run and told apart once the spaces are out.
+PDF_SPLIT_LINE_RE = re.compile(
+    r"^(?P<code>\d+(?:\.\d+)+|[a-z][.)]?)\s+(?P<desc>.+?)\s+(?P<unit>[A-Za-z]\S*)\s+(?P<figures>\d[\d ,.]*\.\d{2})$")
+THREE_FIGURES_RE = re.compile(r"(\d[\d,]*\.\d{2})(\d[\d,]*\.\d{2})(\d[\d,]*\.\d{2})")
+
+
+def split_figures(figures):
+    """
+    (qty, rate) from a priced line's run of figures, or None. The split is
+    only trusted when it is the one the line's own arithmetic bears out:
+    quantity times rate is the amount.
+    """
+    m = THREE_FIGURES_RE.fullmatch(figures.replace(" ", ""))
+    if not m:
+        return None
+    qty, rate, amount = (float(x.replace(",", "")) for x in m.groups())
+    return (qty, rate) if abs(qty * rate - amount) <= 0.01 * max(1.0, amount) / 100 + 0.01 else None
 
 
 def contract_code(text):
@@ -258,6 +277,11 @@ def read_pdf(data):
                 if m:
                     found.add(m.group("code"), float(m.group("rate").replace(",", "")), m.group("unit"),
                               m.group("desc"))
+                    continue
+                m = PDF_SPLIT_LINE_RE.match(line)
+                figures = split_figures(m.group("figures")) if m else None
+                if figures:
+                    found.add(m.group("code"), figures[1], m.group("unit"), m.group("desc"))
                     continue
                 # An unpriced heading still names the item its letters belong to.
                 heading = NUMBERED_RE.match(line)
