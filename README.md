@@ -114,6 +114,7 @@ simply not used. These shapes are read:
   RM205 Consol Doc (Vol. 1).pdf           the whole contract document, as a PDF
   RM206_Rate_Sec A & B 1.xls              .xls workbook
   TR387_ESTIMATION (EL) (r3) 2.xlsb       .xlsb price list
+  TR387 - SA - Annex B.pdf                PDF with a text layer
   TR388_CHC_Price_SOT_Extension.pdf       PDF with a text layer
 ```
 
@@ -137,6 +138,14 @@ schedule it used.
 A price file that cannot be read, names no contract, or yields no Section B items is **not**
 silently skipped: the app names it and says why, so a sheet in an unexpected shape shows up as
 a message rather than as every row quietly reporting N/A.
+
+A PDF schedule is read by column: each page's ruled ITEM / DESCRIPTION / UNIT / QTY / RATE /
+AMOUNT table gives every figure by the column it is printed in, so a `$` before a rate, digits
+split by stray spaces or a new style of item number (`a1)`) do not matter. A page with no ruled
+columns falls back to being read line by line. Each page is then checked against itself: the
+amounts of the items read must add up to the page's own sub-total, and each item's QTY × rate
+must give its amount. A page that does not add up is named in the app, so a schedule read only
+in part is said straight away rather than surfacing later as a PQ item "not in the schedule".
 
 `check_batch()`, which checks a `data/` folder in code, reads its schedules from a `price/`
 folder next to `app.py` instead. `price/` is not committed either.

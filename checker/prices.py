@@ -10,7 +10,8 @@ Section A reuses the same item numbers for planned works at other rates.
 
     {"contract": "RM206", "region": "NORTH EAST", "source": filename,
      "valid_from": date or None, "valid_to": date or None,
-     "items": {"PQ30.1.1": {"rate", "unit", "description"}}}
+     "items": {"PQ30.1.1": {"rate", "unit", "description"}},
+     "warnings": [what in a PDF did not add up, so may be misread]}
 """
 import functools
 import hashlib
@@ -55,6 +56,14 @@ NUMBERED_RE = re.compile(r"^(\d+(?:\.\d+)+)\s")
 PDF_SPLIT_LINE_RE = re.compile(
     r"^(?P<code>\d+(?:\.\d+)+|[a-z][.)]?)\s+(?P<desc>.+?)\s+(?P<unit>[A-Za-z]\S*)\s+(?P<figures>\d[\d ,.]*\.\d{2})$")
 THREE_FIGURES_RE = re.compile(r"(\d[\d,]*\.\d{2})(\d[\d,]*\.\d{2})(\d[\d,]*\.\d{2})")
+# TR387's schedule marks the rate and the amount with a "$", so each is told
+# apart however its digits are split: "a1) for locations with each area <= 2m2
+# m2 471 $ 1 49.00 $ 70,179.00". Its sub-items carry a digit ("a1)", "b3)"),
+# and a quantity can fall on the line above, leaving none on this one.
+PDF_DOLLAR_LINE_RE = re.compile(
+    r"^(?P<code>\d+(?:\.\d+)+|[a-z]\d?[.)]?)\s+(?P<desc>.+?)\s+(?P<unit>\S+)\s+"
+    r"(?:(?P<qty>\d[\d,]*(?:\.\d+)?)\s+)?\$\s*(?P<rate>\d[\d ,]*\.\d{2})\s+\$\s*[\d ,]*\.\d{2}$")
+SUB_ITEM_RE = re.compile(r"[a-z]\d*", re.I)
 
 
 def split_figures(figures):
@@ -122,7 +131,8 @@ class _Items:
         else:
             if self.parent is None:
                 return
-            key = pq_key(self.parent, code[0])
+            # "a)" is item a, "a1)" item a1 - PQ30.2.1a1 on a mastersheet.
+            key = pq_key(self.parent, SUB_ITEM_RE.match(code).group())
         if rate is not None:
             # The first price wins: a later row with the same number is a
             # misread, not a correction.
@@ -267,29 +277,221 @@ def read_pdf(data):
                   if SECTION_B in (text := " ".join(page.get_text().upper().split()))
                   and OPTION_BILL not in text]
 
+    # A page with ruled columns is read by column; any other page line by line.
     found = _Items()
+    warnings = []
     with pdfplumber.open(io.BytesIO(data)) as pdf:
-        for i in wanted:
-            text = pdf.pages[i].extract_text() or ""
-            for line in text.splitlines():
-                line = " ".join(line.split())
-                m = PDF_LINE_RE.match(line)
-                if m:
-                    found.add(m.group("code"), float(m.group("rate").replace(",", "")), m.group("unit"),
-                              m.group("desc"))
-                    continue
-                m = PDF_SPLIT_LINE_RE.match(line)
-                figures = split_figures(m.group("figures")) if m else None
-                if figures:
-                    found.add(m.group("code"), figures[1], m.group("unit"), m.group("desc"))
-                    continue
-                # An unpriced heading still names the item its letters belong to.
-                heading = NUMBERED_RE.match(line)
-                if heading:
-                    found.add(heading.group(1), None, None, line)
+        pages = [(i, _table(pdf.pages[i])) for i in wanted]
+        for n, (i, table) in enumerate(pages):
+            if table is None:
+                _read_lines(pdf.pages[i].extract_text() or "", found)
+                continue
+            # The item after this page's last one tells whether that one is a heading.
+            after = next((row["code"] for _, later in pages[n + 1:n + 2] if later
+                          for row in later["rows"] if row["code"]), None)
+            label = f"page {i + 1}" + (f" ({table['label']})" if table["label"] else "")
+            warnings.extend(f"{label}: {problem}" for problem in _read_table(table, after, found))
 
     schedule["items"] = found.items
+    schedule["warnings"] = warnings
     return schedule
+
+
+def _read_lines(text, found):
+    """A page's priced lines by their pattern, for a page with no ruled columns."""
+    for line in text.splitlines():
+        line = " ".join(line.split())
+        m = PDF_DOLLAR_LINE_RE.match(line)
+        if m:
+            found.add(m.group("code"), float(re.sub(r"[ ,]", "", m.group("rate"))), m.group("unit"),
+                      m.group("desc"))
+            continue
+        m = PDF_LINE_RE.match(line)
+        if m:
+            found.add(m.group("code"), float(m.group("rate").replace(",", "")), m.group("unit"),
+                      m.group("desc"))
+            continue
+        m = PDF_SPLIT_LINE_RE.match(line)
+        figures = split_figures(m.group("figures")) if m else None
+        if figures:
+            found.add(m.group("code"), figures[1], m.group("unit"), m.group("desc"))
+            continue
+        # An unpriced heading still names the item its letters belong to.
+        heading = NUMBERED_RE.match(line)
+        if heading:
+            found.add(heading.group(1), None, None, line)
+
+
+# ---------- PDF, by column ----------
+# A BQ page is a ruled table headed ITEM / DESCRIPTION / UNIT / QTY / RATE /
+# AMOUNT. Taking each figure from the column it is printed in, rather than
+# from where it falls in a line of text, is what makes a "$" before a rate,
+# digits split by stray spaces or a new style of item number not matter.
+HEADER_WORDS = {"ITEM": "code", "DESCRIPTION": "desc", "UNIT": "unit", "QTY": "qty", "RATE": "rate",
+                "AMOUNT": "amount"}
+ROW_CODE_RE = re.compile(r"^(?:\d+(?:\.\d+)*|[a-z]\d?[.)]?)$", re.I)
+# "a. UMH workstation" - a sub-item lettered inside the description column.
+DESC_CODE_RE = re.compile(r"^([a-z]\d?[.)])\s+(.+)$", re.I)
+PAGE_LABEL_RE = re.compile(r"^PQ-\d+$")
+SUBTOTAL_RE = re.compile(r"sub-?\s*total", re.I)
+LINE_TOLERANCE = 2.5     # points between the middles of words on one line
+UNIT_LINE_GAP = 14       # a unit running on to the next line: "per" / "lapping"
+
+
+def _number(text):
+    text = re.sub(r"[$,\s]", "", text or "")
+    return float(text) if re.fullmatch(r"\d+(?:\.\d+)?", text) else None
+
+
+def _table(page):
+    """
+    {"label": "PQ-6" or None, "rows": [...], "subtotal": amount or None} for
+    a page ruled into the BQ's columns, or None for any other page.
+
+    A row is one printed line: {"y", "code", "desc", "unit", "qty", "rate",
+    "amount"}, the figures as numbers. An item's figures are not always on
+    its own line, so rows are tied to items afterwards, by _read_table().
+    """
+    edges = sorted([x for r in page.rects if r["height"] > 50 for x in (r["x0"], r["x1"])]
+                   + [l["x0"] for l in page.lines if abs(l["x0"] - l["x1"]) < 1 and abs(l["top"] - l["bottom"]) > 50])
+    rules = []
+    for x in edges:
+        if not rules or x - rules[-1] > 3:
+            rules.append(x)
+    if len(rules) < 2:
+        return None
+
+    lines = []
+    for w in sorted(page.extract_words(x_tolerance=1.5), key=lambda w: (w["top"] + w["bottom"]) / 2):
+        y = (w["top"] + w["bottom"]) / 2
+        if lines and abs(lines[-1][0] - y) <= LINE_TOLERANCE:
+            lines[-1][1].append(w)
+        else:
+            lines.append((y, [w]))
+
+    def column(w):
+        centre = (w["x0"] + w["x1"]) / 2
+        return sum(1 for x in rules if x <= centre)
+
+    label, columns, rows, subtotal = None, None, [], None
+    for y, words in lines:
+        words.sort(key=lambda w: w["x0"])
+        if columns is None:
+            text = " ".join(w["text"] for w in words)
+            if PAGE_LABEL_RE.match(text):
+                label = text
+            named = {HEADER_WORDS[w["text"].upper()]: column(w) for w in words if w["text"].upper() in HEADER_WORDS}
+            if len(named) == len(HEADER_WORDS) and len(set(named.values())) == len(named):
+                columns = {col: name for name, col in named.items()}
+            continue
+        cells = {}
+        for w in words:
+            name = columns.get(column(w))
+            if name:
+                cells.setdefault(name, []).append(w["text"])
+        row = {"y": y, "code": " ".join(cells.get("code", [])), "desc": " ".join(cells.get("desc", [])),
+               "unit": " ".join(cells.get("unit", [])), "qty": _number("".join(cells.get("qty", []))),
+               "rate": _number("".join(cells.get("rate", []))), "amount": _number("".join(cells.get("amount", [])))}
+        if row["rate"] is None and row["qty"] and row["amount"]:
+            # A stray mark in the cell - RM205 prints one rate as "104 -.23" - is
+            # read past only when the line's own arithmetic bears the rate out.
+            rate = _number(re.sub(r"[^\d.]", "", "".join(cells.get("rate", []))))
+            if rate and abs(row["qty"] * rate - row["amount"]) <= 0.05:
+                row["rate"] = rate
+        if SUBTOTAL_RE.search(row["desc"]):
+            subtotal = row["amount"]
+            break
+        if not ROW_CODE_RE.match(row["code"]):
+            row["code"] = ""
+            m = DESC_CODE_RE.match(row["desc"]) if row["rate"] is not None else None
+            if m:
+                row["code"], row["desc"] = m.groups()
+        rows.append(row)
+    return {"label": label, "rows": rows, "subtotal": subtotal} if columns else None
+
+
+def _is_heading(code, after):
+    """Whether the item numbered `after` comes under `code`: 30.2 over 30.2.1 or a), c) over c1)."""
+    if not after:
+        return False
+    if code[0].isdigit():
+        return not after[0].isdigit() or after.startswith(code + ".")
+    if after[0].isdigit():
+        return False
+    return len(SUB_ITEM_RE.match(code).group()) == 1 and len(SUB_ITEM_RE.match(after).group()) > 1 \
+        and after[0].lower() == code[0].lower()
+
+
+def _read_table(table, after, found):
+    """
+    Add a page's items to `found`, and return what on the page does not add
+    up - so an item missed or misread is said, not left to surface as a PQ
+    item "not in the schedule" months later.
+
+    Most items have their figures on their own line. Where a line of figures
+    stands alone - above or below its item, as the cell happens to be aligned -
+    it lies between two items that do have theirs, and goes to the item there
+    still without any: headings, which have items under them, are not priced.
+    """
+    rows = table["rows"]
+    coded = [k for k, row in enumerate(rows) if row["code"]]
+    following = {k: rows[coded[n + 1]]["code"] if n + 1 < len(coded) else after for n, k in enumerate(coded)}
+    figures = {k: k for k in coded if rows[k]["rate"] is not None}
+
+    def settle(items, loose):
+        if not loose:
+            return
+        leaves = [k for k in items if not _is_heading(rows[k]["code"], following[k])]
+        for candidates in (leaves, items):
+            if len(candidates) == len(loose):
+                figures.update(zip(candidates, loose))
+                return
+
+    items, loose = [], []
+    for k, row in enumerate(rows):
+        if k in figures:
+            settle(items, loose)
+            items, loose = [], []
+        elif row["code"]:
+            items.append(k)
+        elif row["rate"] is not None:
+            loose.append(k)
+    settle(items, loose)
+
+    problems, total = [], 0.0
+    for k in coded:
+        row, priced = rows[k], rows[figures[k]] if k in figures else None
+        code = row["code"]
+        if not ITEM_RE.match(code) and code[0].isdigit():
+            continue                    # "30 FOOTPATHS": a section title
+        if priced is None:
+            found.add(code, None, None, row["desc"])
+            continue
+        # A cell's text may sit a line off its item number, like its figures.
+        desc = row["desc"] or priced["desc"] or next(
+            (r["desc"] for r in rows if r["desc"] and not r["code"] and abs(r["y"] - row["y"]) <= UNIT_LINE_GAP), "")
+        j = figures[k] if priced["unit"] else k
+        unit, y = rows[j]["unit"], rows[j]["y"]
+        for r in rows[j + 1:]:
+            if r["code"] or r["rate"] is not None or r["y"] - y > UNIT_LINE_GAP:
+                break
+            if r["unit"]:
+                unit, y = unit + ("" if not unit or unit.endswith("-") else " ") + r["unit"], r["y"]
+        found.add(code, priced["rate"], unit or None, desc)
+
+        qty, amount = priced["qty"] if priced["qty"] is not None else row["qty"], priced["amount"]
+        total += amount or 0.0
+        if qty is not None and amount is not None and abs(qty * priced["rate"] - amount) > 0.005 * amount + 0.05:
+            problems.append(f"item {code} shows {qty:g} x {priced['rate']:,.2f}, which is not its amount of "
+                            f"{amount:,.2f} - one of the figures may be misread")
+
+    unread = sum(1 for k, row in enumerate(rows) if row["rate"] is not None and k not in figures.values())
+    if table["subtotal"] is not None and abs(total - table["subtotal"]) > 0.05:
+        problems.append(f"the items read add up to {total:,.2f}, but the page's sub-total is "
+                        f"{table['subtotal']:,.2f} - an item may have been missed or misread")
+    elif unread:
+        problems.append(f"{unread} priced line(s) could not be tied to an item number")
+    return problems
 
 
 # ---------- Loading schedules ----------
@@ -431,5 +633,6 @@ def price_list_for(master_bytes, price_files=None):
                    if any(s.get("region") in regions for s in group)]
         if len(matches) == 1:
             contract = matches[0]
-    return {"contract": contract, "schedules": schedules.get(contract, []), "rejected": list(rejected),
-            "where": where}
+    used = schedules.get(contract, [])
+    return {"contract": contract, "schedules": used, "rejected": list(rejected), "where": where,
+            "warnings": [(s["source"], problem) for s in used for problem in s.get("warnings", ())]}

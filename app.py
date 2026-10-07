@@ -125,6 +125,8 @@ if "checked" in st.session_state:
         st.warning("Not in mastersheet: " + joined(result["extra"]))
     for name, why in price_list["rejected"]:
         st.warning(f"Price schedule {name} was not used: it {why}.")
+    for name, problem in price_list.get("warnings", ()):
+        st.warning(f"Price schedule {name} may not have been read in full - {problem}.")
     if not price_list["schedules"]:
         st.warning(f"No price schedule for {price_list['contract'] or 'this contract'} was uploaded, "
                    f"so check 5 (PQ items and prices) was not run.")
